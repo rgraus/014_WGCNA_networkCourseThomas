@@ -1,0 +1,1832 @@
+---
+title: "Analysis for PUB02"
+author: "Thomas Mohr"
+date: \today
+output: pdf_document
+editor_options: 
+    chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                     include = FALSE,
+                     message = FALSE, 
+                     warning = FALSE)
+library(tidyverse)
+library(magrittr)
+library(rio)
+```
+
+```{r initialize_project}
+# define global parameters
+source("InitializeProject.R")
+
+# project specific parameters
+accession <- c("E-GEOD-51401")
+label <- "MDPI"
+font_size <- 8 # default font size in points
+width <- 5.2  # default figure width in inches
+panel_label <- "AUTO"  # default label format
+
+convert_to_enrichresult <- function(x, 
+                                    pAdjustMethod = "BH",
+                                    sep = "~"){
+  require(qvalue)
+  require(tidyverse)
+  Over <- x %>%
+    data.frame(stringsAsFactors = FALSE) %>%
+    mutate(GeneRatio = paste(Count, List.Total, sep = "/")) %>%
+    mutate(BgRatio = paste(Pop.Hits, Pop.Total, sep = "/")) %>%
+    dplyr::rename(pvalue = PValue) %>%
+    mutate(pvalue = as.numeric(pvalue)) %>%
+    mutate(geneID = str_replace_all(Genes, ",\\s*", "/")) %>%
+    mutate(p.adjust = case_when(pAdjustMethod == "bonferroni" ~ Bonferroni, 
+                                TRUE ~ Benjamini)) %>%
+    separate(Term, into = c("ID", "Description"), sep = "~") %>%
+    mutate(rowname = ID) %>%
+    column_to_rownames()
+  qobj <- tryCatch(qvalue(p = Over$pvalue, 
+                          lambda = 0.05, 
+                          pi0.method = "bootstrap"), 
+                   error = function(e) NULL)
+  if (class(qobj) == "qvalue") {
+    qvalues <- qobj$qvalues
+  } else {
+    qvalues <- NA
+  }
+  Over$qvalue <- qvalues
+  Over %>%
+    dplyr::select(ID, 
+                  Description, 
+                  GeneRatio,
+                  pvalue,
+                  p.adjust,
+                  qvalue,
+                  geneID,
+                  Count)
+}
+
+```
+
+# Download Data
+
+```{r download_data}
+library(ArrayExpress)
+library(affy)
+
+# define files to download
+files <- getAE(accession = accession,
+               path = datadir,
+               type = "raw")
+
+# DO PDATA HERE
+pdata <- read.delim(file.path(datadir, "pdata.csv"),
+                    stringsAsFactors = FALSE)
+
+rownames(pdata) <- pdata$SAMPLEID
+
+# construct affybatch
+abatch <- ReadAffy(filenames = file.path(files$path, files$rawFiles))
+
+sampleNames(abatch) <- substr(sampleNames(abatch),1,10)
+
+# attach pdata
+pData(abatch) <- pdata[sampleNames(abatch),]
+
+# save the abatch object
+saveRDS(abatch, file.path(datadir, paste(accession, class(abatch), ".RDS")))
+
+```
+
+# LIMMA
+
+```{r LIMMA}
+library(limma)
+library(tidyverse)
+library(Biobase)
+library(limma)
+library(genefilter)
+ 
+# load the eset
+eset = readRDS(file.path(datadir, 
+                         paste(accession, 
+                               "ExpressionSet", 
+                               "outlierremoved.RDS",
+                               sep = ".")))
+ 
+selected.samples <- pData(eset) %>%
+  filter(MARKER !="NA") %>%
+  dplyr::select(SAMPLEID) %>%
+  deframe()
+ 
+selected.features <- fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA', GENENAME)) %>%
+  dplyr::select(PROBEID) %>%
+  deframe()
+ 
+eset.limma <- eset[selected.features,selected.samples] %>%
+  featureFilter()
+ 
+factor <- factor(paste(eset.limma$CELLTYPE, eset.limma$MARKER, sep = "."),
+                 levels = c("NEC.CD31",
+                            "NEC.CD105",
+                            "TEC.CD31",
+                            "TEC.CD105"))
+block <- eset.limma$PATID
+
+design.matrix <- model.matrix(~0+factor) %>%
+  data.frame(stringsAsFactors = FALSE,
+             check.names = FALSE) %>%
+  rename_all(~str_replace(., "factor", "")) %>%
+  as.matrix()
+
+# define the contrast matrix
+contrast.matrix <- c("TEC.CD31 - NEC.CD31",
+                     "TEC.CD105 - NEC.CD105",
+                     "TEC.CD105 - TEC.CD31",
+                     "NEC.CD105 - NEC.CD31") %>%
+  makeContrasts(contrasts = .,
+                levels = colnames(design.matrix)) %>%
+  data.frame(stringsAsFactors = FALSE,
+             check.names = FALSE) %>%
+  rename_all(~str_replace(., " - ", "vs")) %>%
+  as.matrix()
+
+dc <- duplicateCorrelation(eset.limma, 
+                           design.matrix, 
+                           block=block)
+
+fit <- lmFit(eset.limma, 
+             design.matrix,
+             block = block,
+             correlation = dc$consensus.correlation) %>% 
+  contrasts.fit(contrast.matrix) %>%
+  eBayes() %T>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmafit.RDS",
+                         sep = ".")))
+
+coefs <- as.list(colnames(contrast.matrix))
+names(coefs) <- coefs
+results <- coefs %>%
+  purrr::map(
+    function(x, fit){
+      topTable(fit, 
+               coef = x,
+               number = nrow(fit))
+    },
+    fit = fit)
+
+results$overall <- topTable(fit,
+                            number = nrow(fit))
+
+# output results in xlsx
+
+results %>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmaresult.xlsx", 
+                         sep = ".")))
+# output results in RDS
+
+results %>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmaresult.RDS",
+                         sep = ".")))
+
+results %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                name = paste(y, "csv", sep = ".")
+                x %>% rio::export(here::here(plotsdir, name))
+              })
+
+```
+
+# Biologic context of DEGs using DAVID
+
+```{r biologic_context_DEGS_DAVID}
+library(clusterProfiler)
+library(RDAVIDWebService)
+
+limma_results <- import(file.path(resultsdir,
+                                  paste(accession, 
+                                        "limmaresults.RDS",
+                                        sep = "."))) %>%
+  extract(names(.) != "overall")
+
+david.user <- "thomas.mohr@meduniwien.ac.at"
+url <- "https://david.ncifcrf.gov/webservice/services/DAVIDWebService.DAVIDWebServiceHttpSoap12Endpoint/"
+timeout <- 180000
+idType <- "ENTREZ_GENE_ID"
+minGSSize <- 10
+maxGSSize <- 500 
+background <- "HT Human Genome U133 Plus Set"
+pAdjustMethod = "BH"
+
+limma_results <- limma_results %>%
+  purrr::map(function(x){
+    x %>%
+      dplyr::filter(adj.P.Val <= 0.05) %>%
+      dplyr::filter(abs(logFC) >= 1)
+  })
+
+# extract the genelists
+genes <- limma_results %>%
+  purrr::map(function(x){
+    x$ENTREZID
+  })
+
+
+
+# upload the lists
+david <- DAVIDWebService$new(email = david.user, 
+                             url = url)
+setTimeOut(david, timeout)
+genes %>%
+  purrr::map2(., 
+              names(.),
+              function(x,y){
+              addList(david, 
+                      x, 
+                      idType = idType, 
+                      listName = y, 
+                      listType = "Gene")})
+
+lists <- getGeneListNames(david)
+names(lists) <- lists
+
+# set the annotation
+annotation <- "GOTERM_BP_DIRECT" 
+setAnnotationCategories(david, 
+                        annotation)
+
+# download the results
+biologic_context_GO_BP <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getFunctionalAnnotationChart(david, 
+                                     threshold = 1, 
+                                     count = minGSSize))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_BP_LIMMA.RDS"))
+
+enrich_result <- genes %>%
+  purrr::map2(.,
+              names(.),
+              function(x,
+                       y, 
+                       biologic_context, 
+                       pAdjustMethod, 
+                       ontology, 
+                       keytype){
+                data <- try(convert_to_enrichresult(biologic_context[[y]],
+                                                pAdjustMethod))
+                if (class(data) != "data.frame"){
+                  data
+                } else {
+                result <- new("enrichResult",
+                              result = data,
+                              organism = "human",
+                              pAdjustMethod = pAdjustMethod,
+                              pvalueCutoff = 1,
+                              qvalueCutoff = 1,
+                              gene = x,
+                              ontology = ontology,
+                              keytype = keytype)
+                enrichplot::pairwise_termsim(result)}
+              },
+              biologic_context = biologic_context_GO_BP,
+              pAdjustMethod = pAdjustMethod,
+              ontology = annotation,
+              keytype = idType)
+
+enrich_result %>%
+  export(here::here(resultsdir, "DAVID_RESULTS_BP_LIMMA_enrichResult.RDS"))
+
+# download the clustering
+biologic_context_GO_BP <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getClusterReport(david))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_BP_cluster_LIMMA.RDS"))
+
+# construct an enrichResult
+
+
+
+annotation <- "GOTERM_MF_DIRECT" 
+setAnnotationCategories(david, 
+                        annotation)
+
+biologic_context_GO_MF <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getFunctionalAnnotationChart(david, 
+                                     threshold = 1, 
+                                     count = minGSSize))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_MF_LIMMA.RDS"))
+
+enrich_result <- genes %>%
+  purrr::map2(.,
+              names(.),
+              function(x,
+                       y, 
+                       biologic_context, 
+                       pAdjustMethod, 
+                       ontology, 
+                       keytype){
+                data <- try(convert_to_enrichresult(biologic_context[[y]],
+                                                pAdjustMethod))
+                if (class(data) != "data.frame"){
+                  data
+                } else {
+                result <- new("enrichResult",
+                              result = data,
+                              organism = "human",
+                              pAdjustMethod = pAdjustMethod,
+                              pvalueCutoff = 1,
+                              qvalueCutoff = 1,
+                              gene = x,
+                              ontology = ontology,
+                              keytype = keytype)
+                enrichplot::pairwise_termsim(result)}
+              },
+              biologic_context = biologic_context_GO_MF,
+              pAdjustMethod = pAdjustMethod,
+              ontology = annotation,
+              keytype = idType)
+
+enrich_result %>%
+  export(here::here(resultsdir, "DAVID_RESULTS_MF_LIMMA_enrichResult.RDS"))
+
+biologic_context_GO_MF <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getClusterReport(david))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_MF_cluster_LIMMA.RDS"))
+
+annotation <- "KEGG_PATHWAY" 
+setAnnotationCategories(david, 
+                        annotation)
+
+biologic_context_GO_KEGG <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getFunctionalAnnotationChart(david, 
+                                     threshold = 1, 
+                                     count = minGSSize))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_KEGG_LIMMA.RDS"))
+
+enrich_result <- genes %>%
+  purrr::map2(.,
+              names(.),
+              function(x,
+                       y, 
+                       biologic_context, 
+                       pAdjustMethod, 
+                       ontology, 
+                       keytype){
+                data <- try(convert_to_enrichresult(biologic_context[[y]],
+                                                pAdjustMethod))
+                if (class(data) != "data.frame"){
+                  data
+                } else {
+                result <- new("enrichResult",
+                              result = data,
+                              organism = "human",
+                              pAdjustMethod = pAdjustMethod,
+                              pvalueCutoff = 1,
+                              qvalueCutoff = 1,
+                              gene = x,
+                              ontology = ontology,
+                              keytype = keytype)
+                enrichplot::pairwise_termsim(result)}
+              },
+              biologic_context = biologic_context_GO_KEGG,
+              pAdjustMethod = pAdjustMethod,
+              ontology = annotation,
+              keytype = idType)
+
+enrich_result %>%
+  export(here::here(resultsdir, "DAVID_RESULTS_KEGG_LIMMA_enrichResult.RDS"))
+
+biologic_context_GO_KEGG <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getClusterReport(david))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_KEGG_cluster_LIMMA.RDS"))
+
+```
+
+# Biologic context of DEGs using clusterprofiler - GOTEA
+
+```{r biologic_context_DEGS_GOTEA}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+limma_results <- import(file.path(resultsdir,
+                                  paste(accession, 
+                                        "limmaresult.RDS",
+                                        sep = "."))) %>%
+  extract(names(.) != "overall") %>%
+  bind_rows(.id = "CONTRAST")
+
+universe <- unique(limma_results$ENTREZID)
+
+biologic_context_GO_BP_up <- limma_results %>%
+  dplyr::filter(logFC > 1 & adj.P.Val < 0.05) %>%
+  dplyr::select(CONTRAST, ENTREZID) %>%
+  nest(gg = -"CONTRAST") %>%
+  deframe() %>%
+  purrr::map(function(x){
+    try(enrichGO(x$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 pvalueCutoff = 1,
+                 qvalueCutoff = 1,
+                 ont = "BP",
+                 universe = universe,
+                 readable = TRUE))
+  }) %T>%
+  export(here::here(resultsdir, "CLUSTERPROFILER_BP_UP.RDS"))
+
+biologic_context_GO_BP_down <- limma_results %>%
+  dplyr::filter(logFC < -1 & adj.P.Val < 0.05) %>%
+  dplyr::select(CONTRAST, ENTREZID) %>%
+  nest(gg = -"CONTRAST") %>%
+  deframe() %>%
+  purrr::map(function(x){
+    try(enrichGO(x$ENTREZID,
+                 OrgDb = org.Hs.eg.db,
+                 pvalueCutoff = 1,
+                 qvalueCutoff = 1,
+                 ont = "BP",
+                 universe = universe,
+                 readable = TRUE))
+  }) %T>%
+  export(here::here(resultsdir, "CLUSTERPROFILER_BP_DOWN.RDS"))
+
+```
+
+# Biologic context of DEGs using GSVA
+
+```{r biologic_context_DEGS_GSVA}
+library(GSVA)
+library(GO.db)
+library(org.Hs.eg.db)
+library(genefilter)
+library(limma)
+library(tidygraph)
+library(rrvgo)
+
+eset = readRDS(file.path(datadir, 
+                         paste(accession, 
+                               "ExpressionSet", 
+                               "outlierremoved.RDS",
+                               sep = ".")))
+ 
+selected.samples <- pData(eset) %>%
+  filter(MARKER !="NA") %>%
+  dplyr::select(SAMPLEID) %>%
+  deframe()
+ 
+selected.features <- fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA', GENENAME)) %>%
+  dplyr::select(PROBEID) %>%
+  deframe()
+ 
+eset.gsva <- eset[selected.features,selected.samples] %>%
+  featureFilter()
+
+featureNames(eset.gsva) <- fData(eset.gsva)$ENTREZID
+
+GO_terms <- GO.db::GOTERM %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::filter(Ontology == "BP") %>%
+  dplyr::select(go_id, Term) %>%
+  distinct() %>%
+  mutate(rowname = go_id) %>%
+  column_to_rownames()
+
+genes <- org.Hs.egGO2ALLEGS %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::filter(Ontology == "BP") %>%
+  dplyr::select(gene_id, go_id) %>%
+  nest(gg = -"go_id") %>%
+  deframe() %>%
+  purrr::map(deframe)
+
+gsva <- eset.gsva %>%
+  gsva(gset.idx.list = genes,
+       min.sz = 15,
+       max.sz = 500)
+
+fData(gsva) <- GO_terms[featureNames(gsva),]
+
+gsva %>%
+  export(here::here(resultsdir, "RESULT_GSVA.RDS"))
+
+
+
+factor <- factor(paste(gsva$CELLTYPE, gsva$MARKER, sep = "."),
+                 levels = c("NEC.CD31",
+                            "NEC.CD105",
+                            "TEC.CD31",
+                            "TEC.CD105"))
+block <- gsva$PATID
+
+design.matrix <- model.matrix(~0+factor) %>%
+  data.frame(stringsAsFactors = FALSE,
+             check.names = FALSE) %>%
+  rename_all(~str_replace(., "factor", "")) %>%
+  as.matrix()
+
+# define the contrast matrix
+contrast.matrix <- c("TEC.CD31 - NEC.CD31",
+                     "TEC.CD105 - NEC.CD105",
+                     "TEC.CD105 - TEC.CD31",
+                     "NEC.CD105 - NEC.CD31") %>%
+  makeContrasts(contrasts = .,
+                levels = colnames(design.matrix)) %>%
+  data.frame(stringsAsFactors = FALSE,
+             check.names = FALSE) %>%
+  rename_all(~str_replace(., " - ", "vs")) %>%
+  as.matrix()
+
+dc <- duplicateCorrelation(gsva, 
+                           design.matrix, 
+                           block=block)
+
+fit <- lmFit(gsva, 
+             design.matrix,
+             block = block,
+             correlation = dc$consensus.correlation) %>% 
+  contrasts.fit(contrast.matrix) %>%
+  eBayes() %T>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmafit_GSVA.RDS",
+                         sep = ".")))
+
+coefs <- as.list(colnames(contrast.matrix))
+names(coefs) <- coefs
+results <- coefs %>%
+  purrr::map(
+    function(x, fit){
+      topTable(fit, 
+               coef = x,
+               number = nrow(fit))
+    },
+    fit = fit)
+
+results$overall <- topTable(fit,
+                            number = nrow(fit))
+
+# output results in xlsx
+
+results %>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmaresult_GSVA.xlsx", 
+                         sep = ".")))
+# output results in RDS
+
+results %>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmaresult_GSVA.RDS",
+                         sep = ".")))
+```
+
+# Biologic context of DEGs using GSVA & PATHWAYS
+
+```{r biologic_context_DEGS_GSVA}
+library(GSVA)
+library(GO.db)
+library(msigdbr)
+library(genefilter)
+library(limma)
+library(tidygraph)
+library(rWikiPathways)
+
+eset = readRDS(file.path(datadir, 
+                         paste(accession, 
+                               "ExpressionSet", 
+                               "outlierremoved.RDS",
+                               sep = ".")))
+ 
+selected.samples <- pData(eset) %>%
+  filter(MARKER !="NA") %>%
+  dplyr::select(SAMPLEID) %>%
+  deframe()
+ 
+selected.features <- fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA', GENENAME)) %>%
+  dplyr::select(PROBEID) %>%
+  deframe()
+ 
+eset.gsva <- eset[selected.features,selected.samples] %>%
+  featureFilter()
+
+featureNames(eset.gsva) <- fData(eset.gsva)$ENTREZID
+
+# Get the pathways
+wp_hs_gmt <- rWikiPathways::downloadPathwayArchive(organism="Homo sapiens", 
+                                                   format = "gmt",
+                                                   destpath = datadir)
+
+cancer_hallmarks <- rio::import(here::here(datadir, "cancer_hallmarks.csv")) %>%
+  remove_rownames() %>%
+  mutate(rowname = wpid) %>%
+  column_to_rownames()
+
+wp2gene <- readPathwayGMT(here::here(datadir, wp_hs_gmt)) %>%
+  dplyr::filter(wpid %in% cancer_hallmarks$wpid)
+
+
+
+wp2term <- wp2gene %>%
+  dplyr::select(-gene, -name) %>%
+  distinct() %>%
+  inner_join(cancer_hallmarks, by = c(wpid = "wpid"))
+
+fdata <- wp2term %>%
+  mutate(rowname = wpid) %>%
+  column_to_rownames()
+
+m_t2g <- wp2gene %>%
+  dplyr::select(wpid, gene) %>%
+  nest(gg = -"wpid") %>%
+  deframe() %>%
+  purrr::map(deframe)
+
+gsva <- eset.gsva %>%
+  gsva(gset.idx.list = m_t2g,
+       parallel.sz = 16)
+
+fData(gsva) <- fdata[featureNames(gsva),]
+
+gsva %>%
+  export(here::here(resultsdir, "PATHWAY_RESULT_GSVA_.RDS"))
+
+
+
+factor <- factor(paste(gsva$CELLTYPE, gsva$MARKER, sep = "."),
+                 levels = c("NEC.CD31",
+                            "NEC.CD105",
+                            "TEC.CD31",
+                            "TEC.CD105"))
+block <- gsva$PATID
+
+design.matrix <- model.matrix(~0+factor) %>%
+  data.frame(stringsAsFactors = FALSE,
+             check.names = FALSE) %>%
+  rename_all(~str_replace(., "factor", "")) %>%
+  as.matrix()
+
+# define the contrast matrix
+contrast.matrix <- c("TEC.CD31 - NEC.CD31",
+                     "TEC.CD105 - NEC.CD105",
+                     "TEC.CD105 - TEC.CD31",
+                     "NEC.CD105 - NEC.CD31") %>%
+  makeContrasts(contrasts = .,
+                levels = colnames(design.matrix)) %>%
+  data.frame(stringsAsFactors = FALSE,
+             check.names = FALSE) %>%
+  rename_all(~str_replace(., " - ", "vs")) %>%
+  as.matrix()
+
+dc <- duplicateCorrelation(gsva, 
+                           design.matrix, 
+                           block=block)
+
+fit <- lmFit(gsva, 
+             design.matrix,
+             block = block,
+             correlation = dc$consensus.correlation) %>% 
+  contrasts.fit(contrast.matrix) %>%
+  eBayes() %T>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmafit_GSVA.RDS",
+                         sep = ".")))
+
+coefs <- as.list(colnames(contrast.matrix))
+names(coefs) <- coefs
+results <- coefs %>%
+  purrr::map(
+    function(x, fit){
+      topTable(fit, 
+               coef = x,
+               number = nrow(fit))
+    },
+    fit = fit)
+
+results$overall <- topTable(fit,
+                            number = nrow(fit))
+
+# output results in xlsx
+
+results %>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmaresult_PATHWAYS_GSVA.xlsx", 
+                         sep = ".")))
+# output results in RDS
+
+results %>%
+  export(file.path(resultsdir,
+                   paste(accession, 
+                         "limmaresult_PATHWAYS_GSVA.RDS",
+                         sep = ".")))
+```
+
+# GO term reduction GSVA using semantic similarity
+
+```{r go_term_reduction_GSVA}
+library(rrvgo)
+library(GOSemSim)
+library(tidygraph)
+library(umap)
+
+p_threshold <- 0.05
+limma_results <- import(file.path(resultsdir,
+                                  paste(accession, 
+                                        "limmaresult_GSVA.RDS",
+                                        sep = "."))) %>%
+  extract(names(.) != "overall")
+  
+ 
+scores <- limma_results %>%
+  purrr::map(function(x){
+    x %>%
+      dplyr::select(go_id, adj.P.Val) %>%
+      mutate(adj.P.Val = -log10(adj.P.Val)) %>%
+      dplyr::rename(go = go_id)
+  })
+
+d <- GOSemSim::godata("org.Hs.eg.db", 
+                      ont = "BP")
+
+# calculate the similarity matrices
+sim_matrices_up <- limma_results %>%
+  purrr::map(function(x){
+    x <- x %>%
+      dplyr::filter(adj.P.Val < p_threshold) %>%
+      dplyr::filter(logFC > 0)
+    calculateSimMatrix(x$go_id,
+                       orgdb = "org.Hs.eg.db",
+                       semdata = d,
+                       ont = "BP",
+                       method = "Wang")
+  })
+
+sim_matrices_up %>%
+  rio::export(here::here(resultsdir, "sim_matrices_GSVA_up.RDS"))
+
+sim_matrices_down <- limma_results %>%
+  purrr::map(function(x){
+    x <- x %>%
+      dplyr::filter(adj.P.Val < p_threshold) %>%
+      dplyr::filter(logFC < 0)
+    calculateSimMatrix(x$go_id,
+                       orgdb = "org.Hs.eg.db",
+                       semdata = d,
+                       ont = "BP",
+                       method = "Wang")
+  })
+
+sim_matrices_down %>% 
+  rio::export(here::here(resultsdir, "sim_matrices_GSVA_down.RDS"))
+
+# reduce terms to clusters
+
+reduced_terms_up <- sim_matrices_up %>%
+  purrr::map2(.,
+              scores,
+              function(x,y){
+                scores <- y[rownames(x),] %>%
+                  deframe()
+                reduceSimMatrix_umap(x,
+                                     scores = scores,
+                                     orgdb = "org.Hs.eg.db")
+    })
+
+reduced_terms_up %>%
+  rio::export(here::here(resultsdir, "reduced_terms_GSVA_up.RDS"))
+
+reduced_terms_down <- sim_matrices_down %>%
+  purrr::map2(.,
+              scores,
+              function(x,y){
+                scores <- y[rownames(x),] %>%
+                  deframe()
+                reduceSimMatrix_umap(x,
+                                     scores = scores,
+                                     orgdb = "org.Hs.eg.db")
+    })
+
+reduced_terms_down%>%
+  rio::export(here::here(resultsdir, "reduced_terms_GSVA_down.RDS"))
+
+```
+
+# PATHWAY reduction GSVA using semantic similarity
+
+```{r go_term_reduction_GSVA}
+library(rrvgo)
+library(GOSemSim)
+library(msigdbr)
+library(tidygraph)
+library(umap)
+limma_results <- import(file.path(resultsdir,
+                                  paste(accession, 
+                                        "limmaresult_PATHWAYS_GSVA.RDS",
+                                        sep = "."))) %>%
+  extract(names(.) != "overall")
+ 
+scores <- limma_results %>%
+  purrr::map(function(x){
+    x %>%
+      dplyr::select(gs_id, adj.P.Val) %>%
+      mutate(adj.P.Val = -log10(adj.P.Val)) %>%
+      dplyr::rename(go = gs_id)
+  })
+
+molsigdb <- msigdbr(species = "Homo sapiens")
+
+m_t2g <- molsigdb %>%
+  filter(gs_subcat %in% c("CP:WIKIPATHWAYS")) %>%
+  select(gs_id, entrez_gene) %>%
+  nest(gg = -"gs_id") %>%
+  deframe() %>%
+  purrr::map(deframe)
+
+
+
+sim_matrices <- limma_results %>%
+  purrr::map(function(x){
+    x <- x %>%
+      dplyr::filter(adj.P.Val < 0.05) %>%
+      dplyr::select(gs_id)
+    genesets <- molsigdb %>%
+      inner_join(x) %>%
+      dplyr::select(gs_id, entrez_gene) %>%
+      nest(gg = -"gs_id") %>%
+      deframe() %>%
+      purrr::map(deframe)
+    create_kappa_matrix(genesets)
+  }) 
+
+sim_matrices %>%
+  export(here::here(resultsdir, "sim_matrices_PATHWAYS_GSVA.RDS"))
+
+sim_matrices_up <- limma_results %>%
+  purrr::map(function(x){
+    x <- x %>%
+      dplyr::filter(adj.P.Val < 0.05) %>%
+      dplyr::filter(logFC > 0) %>%
+      dplyr::select(gs_id)
+    genesets <- molsigdb %>%
+      inner_join(x) %>%
+      dplyr::select(gs_id, entrez_gene) %>%
+      nest(gg = -"gs_id") %>%
+      deframe() %>%
+      purrr::map(deframe)
+    create_kappa_matrix(genesets)
+  }) 
+
+sim_matrices_up %>%
+  rio::export(here::here(resultsdir, "sim_matrices_PATHWAYS_GSVA_up.RDS"))
+
+umap_results <- sim_matrices_up %>%
+  purrr::map(function(x){
+    umap <- umap(x)
+    cluster <- fpc::dbscan(umap$layout, 
+                eps = 0.6, 
+                MinPts = 3)
+    cbind(umap$layout, cluster$cluster) %>%
+      data.frame(stringsAsFactors = FALSE) %>%
+      set_names(c("x", "y", "cluster")) %>%
+      rownames_to_column("gs_id")
+  })
+
+reduced_terms_up <- limma_results %>%
+  purrr::map2(.,
+              umap_results,
+              inner_join)
+
+reduced_terms_up%>%
+  rio::export(here::here(resultsdir, "reduced_terms_PATHWAYS_GSVA_up.RDS"))
+
+sim_matrices_down <- limma_results %>%
+  purrr::map(function(x){
+    x <- x %>%
+      dplyr::filter(adj.P.Val < 0.05) %>%
+      dplyr::filter(logFC < 0) %>%
+      dplyr::select(gs_id)
+    genesets <- molsigdb %>%
+      inner_join(x) %>%
+      dplyr::select(gs_id, entrez_gene) %>%
+      nest(gg = -"gs_id") %>%
+      deframe() %>%
+      purrr::map(deframe)
+    create_kappa_matrix(genesets)
+  }) 
+
+sim_matrices_down %>% 
+  rio::export(here::here(resultsdir, "sim_matrices_PATHWAYS_GSVA_down.RDS"))
+
+umap_results <- sim_matrices_down %>%
+  purrr::map(function(x){
+    umap <- umap(x)
+    cluster <- fpc::dbscan(umap$layout, 
+                eps = 0.6, 
+                MinPts = 5)
+    cbind(umap$layout, cluster$cluster) %>%
+      data.frame(stringsAsFactors = FALSE) %>%
+      set_names(c("x", "y", "cluster")) %>%
+      rownames_to_column("gs_id")
+  })
+
+reduced_terms_down <- limma_results %>%
+  purrr::map2(.,
+              umap_results,
+              inner_join)
+
+reduced_terms_down%>%
+  rio::export(here::here(resultsdir, "reduced_terms_PATHWAYS_GSVA_down.RDS"))
+
+```
+
+# WGCNA
+
+```{r WGCNA}
+library(Biobase)
+library(mixtools)
+library(genefilter)
+library(WGCNA)
+
+# enable multithreading in WGCNA
+enableWGCNAThreads(6)
+options(stringsAsFactors = FALSE)
+
+# load relavent data
+eset <- readRDS(file.path(datadir, paste(accession, "ExpressionSet.outlierremoved.RDS", sep = ".")))
+
+# filter sammples
+
+selected.samples = pData(eset) %>%
+  filter(MARKER !="NA") %>%
+  .$SAMPLEID
+  
+# optional: don't filter
+# selected samples = c(1:nSamples(eset))
+
+# select features
+selected.features = fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA', GENENAME)) %>%
+  .$PROBEID
+  
+# optional: take all
+# selected.features = c(1:nFeatcolt))
+  
+# filter ebased on ENTREZID and remove duplicates
+eset.wgcna <- eset[selected.features,selected.samples] %>%
+  featureFilter()
+
+# filter the set by fitting a MOG and selecting genes with a posterior 2 > 0.5
+mixmdl <- as.numeric(exprs(eset.wgcna)) %>% 
+  sort() %>%
+  normalmixEM()
+
+
+# determine the threshold
+threshold <- mixmdl$x[min(which(mixmdl$posterior[,2] > 0.5))]
+
+# which genes are below the threshold in all samples ?
+selected.genes <- apply(exprs(eset.wgcna),
+                  1,
+                  function(x, threshold){
+                    return(!(sum(x<threshold) == length(x)))
+                  },
+                  threshold = threshold) %>%
+  names(.)[.]
+
+# optional: filter the ExpressionSet object
+eset.wgcna <- eset.wgcna[selected.genes,]
+
+# Outlier check via zKonnectivity
+eset_wgcna <- eset.wgcna
+
+expression <- exprs(eset_wgcna)
+
+ISA <- (cor(expression) + 1)/2^2
+
+ISA %>%
+  rio::export(here::here(resultsdir, "ISA.RDS"))
+
+networkConcepts <- WGCNA::networkConcepts(expression,
+                                          power = 2,
+                                          networkType = "signed")
+
+networkConcepts %>%
+  rio::export(here::here(resultsdir, "networkConcepts.RDS"))
+
+connectivity <- networkConcepts$Connectivity
+clustercoefficient <- networkConcepts$ClusterCoef
+zK <- (connectivity - mean(connectivity))/sqrt(sd(connectivity))
+zC <- (clustercoefficient - mean(clustercoefficient))/sqrt(sd(clustercoefficient))
+
+outliers <- names(zK)[abs(zK) > 2]
+
+eset_wgcna <- eset_wgcna[,!(sampleNames(eset_wgcna) %in% outliers)]
+
+# define the params for WGCNA
+params <- list(networkType = "signed",
+               corType = "bicor",
+               maxBlockSize = 21000,
+               # TOMType = "signed",
+               minModuleSize = 30,
+               reassignThreshold = 1e-6,
+               detectCutHeight = .998,
+               mergeCutHeight = 0.15,
+               deepSplit = 2,
+               numericLabels = TRUE,
+               pamStage = TRUE,
+               pamRespectsDendro = TRUE,
+               verbose = 0,
+               datExpr = t(exprs(eset_wgcna)))
+# Choose a set of soft-thresholding powers
+
+
+
+powers = c(seq(1,10,by=1), seq(12,20, by=2));
+sft = pickSoftThreshold(params$datExpr,
+                        corFnc = bicor,
+                        RsquaredCut = 0.8,
+                        powerVector=powers,
+                        networkType = params$networkType,
+                        verbose = 6)
+
+beta <- sft$powerEstimate
+if (is.na(beta)){
+  if (params$networkType == "unsigned"){
+    beta <- 6
+  } else {
+    beta <- 12
+  }
+}
+
+collectGarbage();
+params$power <- beta
+
+### construct the network in a one-step process using iterative WGCNA
+# the result is a network object containing the additional element of "refinedColors".
+
+net <- do.call(iterativeWGCNA, c(params))
+
+# attach the underlying parameters and data
+net$params <- as.list(args(iterativeWGCNA))
+net$params[names(params)] <- params
+net$eset <- eset_wgcna
+# save the net object and we are finished
+saveRDS(net, file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+```
+
+# Calculation of the association between modules and traits
+
+```{r calculate_association}
+library(WGCNA)
+library(lmerTest)
+library(Biobase)
+
+net <- readRDS(file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+# correlate traits with module eigengenes
+pdata <- pData(net$eset) %>%
+  dplyr::select(SAMPLEID, PATID, CELLTYPE, MARKER) %>%
+  mutate(PATID = as.character(PATID)) %>%
+  mutate(CELLTYPE = factor(CELLTYPE,
+                           levels = c("NEC", "TEC"))) %>%
+  mutate(MARKER = factor(MARKER,
+                             levels = c("CD31", "CD105")))
+
+# Define numbers of genes and samples
+moduleColors = paste("M", net$refinedColors, sep = "")
+nSamples <- nrow(net$params$datExpr)
+
+# Recalculate MEs with color labels
+MEs <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  dplyr::select(!matches("MEgrey"))
+
+# calculate the correlation
+# moduleTraitCor <- cor(MEs, as.matrix(traits), use = "p")
+# calculate the p-value for the correlation coefficient
+# moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+# Alternatively do a mixed effect model as described in Li et al
+
+# define the model
+formula <- Y ~ CELLTYPE + MARKER + (1|PATID)
+
+# create a dataframe for input
+lmeData <- MEs %>% 
+  rownames_to_column("SAMPLEID") %>%
+  pivot_longer(cols = starts_with("ME"),
+               values_to ="Y",
+               names_to = "MODULE") %>%
+  inner_join(pdata)
+
+# Apply the linear model per Module
+lmeResult <- lmeData %>%
+  tidyr::nest(group = -"MODULE") %>%
+  mutate_at(
+    "group",
+    purrr::map,
+    function(x){
+      lmerTest::lmer(formula = formula,
+           data = x) %>%
+        summary() %>%
+        extract("coefficients") %>%
+        .$coefficients %>%
+        data.frame(stringsAsFactors = FALSE) %>%
+        rownames_to_column("COEFFICIENT")    
+      }) %>%
+  deframe() %>%
+  bind_rows(.id = "MODULE") %>%
+  dplyr::rename(p.value = Pr...t..) %>%
+  mutate(adj.P.Val = p.adjust(p.value, 
+                              method = "hochberg")) %>%
+  dplyr::filter(COEFFICIENT != "(Intercept)") %>%
+  mutate(COEFFICIENT = str_replace(COEFFICIENT, "TEC", "")) %>%
+  mutate(COEFFICIENT = str_replace(COEFFICIENT, "CD105", ""))
+
+# calculate the t-statustics
+moduleTraitCor <- lmeResult %>%
+  dplyr::select(MODULE, COEFFICIENT, t.value) %>%
+  pivot_wider(names_from = COEFFICIENT,
+              values_from = t.value)  %>%
+  column_to_rownames("MODULE")
+
+# calculate the adjusted p-value
+moduleTraitPvalue <-  lmeResult %>%
+  dplyr::select(MODULE, COEFFICIENT, adj.P.Val) %>%
+  pivot_wider(names_from = COEFFICIENT,
+              values_from = adj.P.Val)  %>%
+  column_to_rownames("MODULE")
+
+order <- hclust(dist(moduleTraitCor))$order
+moduleTraitCor <- moduleTraitCor[order,]
+moduleTraitPvalue <- moduleTraitPvalue[rownames(moduleTraitCor),]
+
+
+# convert the matrices into a data frame, with module annotation
+moduleTraitPvalue <- moduleTraitPvalue %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  pivot_longer(!matches("module"))
+
+moduleTraitCor <- moduleTraitCor %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  pivot_longer(!matches("module")) %T>%
+  # save module trait cor
+  saveRDS(file.path(resultsdir, "ModuleTraitCor.RDS"))
+
+heatmap_data <- full_join(moduleTraitCor, moduleTraitPvalue, 
+                      by = c("module", "name")) %>%
+  mutate(label = paste(signif(value.x, 2), " (",
+                       signif(value.y, 1), ")", sep = "")) %>%
+  # select relevant columns
+  dplyr::select(module, name, value.x, label) %>%
+  
+  # rename them accordingly
+  dplyr::rename(Y = module, X = name, value = value.x) %>%
+  mutate(X = factor(X, levels = c("CELLTYPE", "MARKER"))) %T>%
+  export(file.path(resultsdir, 
+                   paste(accession, 
+                         "association", 
+                         "RDS", 
+                         sep = ".")))
+```
+
+# Biologic context of the modules using DAVID
+
+```{r caclulate_biologic_context}
+library(Biobase)
+library(genefilter)
+library(clusterProfiler)
+library(RDAVIDWebService)
+
+##### BEGIN Biologic context ---------------------------------------
+net <- readRDS(file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+universe <- import(here::here(datadir, "E-GEOD-51401.ExpressionSet.outlierremoved.RDS")) %>%
+  featureFilter() %>%
+  fData() %>%
+  dplyr::select(PROBEID) %>%
+  deframe()
+  
+
+pvalueCutoff <- 1
+qvalueCutoff <- 1
+
+genelist <- data.frame(ENTREZID = fData(net$eset)$ENTREZID,
+                       module = paste("M", net$refinedColors, sep ="")) %>%
+  dplyr::filter(module != "grey") %>%
+  tidyr::nest(gg = -"module") %>%
+  deframe()
+
+
+david.user <- "thomas.mohr@meduniwien.ac.at"
+url <- "https://david.ncifcrf.gov/webservice/services/DAVIDWebService.DAVIDWebServiceHttpSoap12Endpoint/"
+timeout <- 180000
+idType <- "ENTREZ_GENE_ID"
+minGSSize <- 10
+maxGSSize <- 500 
+pAdjustMethod = "BH"
+
+genes <- genelist %>%
+  purrr::map(function(x){
+    x$ENTREZID
+  })
+
+# upload the lists
+david <- DAVIDWebService$new(email = david.user, 
+                             url = url)
+setTimeOut(david, timeout)
+genes %>%
+  purrr::map2(., 
+              names(.),
+              function(x,y){
+              addList(david, 
+                      x, 
+                      idType = idType, 
+                      listName = y, 
+                      listType = "Gene")})
+
+lists <- getGeneListNames(david)
+names(lists) <- lists
+
+# set the annotation
+annotation <- "GOTERM_BP_DIRECT" 
+setAnnotationCategories(david, 
+                        annotation)
+
+# download the results
+biologic_context_GO_BP <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getFunctionalAnnotationChart(david, 
+                                     threshold = 1, 
+                                     count = minGSSize))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_BP_MODULES.RDS"))
+
+# construct an enrichResult
+
+enrich_result <- genes %>%
+  purrr::map2(.,
+              names(.),
+              function(x,
+                       y, 
+                       biologic_context, 
+                       pAdjustMethod, 
+                       ontology, 
+                       keytype){
+                data <- try(convert_to_enrichresult(biologic_context[[y]],
+                                                pAdjustMethod))
+                if (class(data) != "data.frame"){
+                  data
+                } else {
+                result <- new("enrichResult",
+                              result = data,
+                              organism = "human",
+                              pAdjustMethod = pAdjustMethod,
+                              pvalueCutoff = 1,
+                              qvalueCutoff = 1,
+                              gene = x,
+                              ontology = ontology,
+                              keytype = keytype)
+                enrichplot::pairwise_termsim(result)}
+              },
+              biologic_context = biologic_context_GO_BP,
+              pAdjustMethod = pAdjustMethod,
+              ontology = annotation,
+              keytype = idType)
+
+enrich_result %>%
+  export(here::here(resultsdir, "DAVID_RESULTS_BP_MODULES_enrichResult.RDS"))
+
+# download the clustering
+biologic_context_GO_BP <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getClusterReport(david))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_BP_MODULES_cluster.RDS"))
+
+
+
+
+annotation <- "GOTERM_MF_DIRECT" 
+setAnnotationCategories(david, 
+                        annotation)
+
+biologic_context_GO_MF <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getFunctionalAnnotationChart(david, 
+                                     threshold = 1, 
+                                     count = minGSSize))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_MF_MODULES.RDS"))
+
+
+
+enrich_result <- genes %>%
+  purrr::map2(.,
+              names(.),
+              function(x,
+                       y, 
+                       biologic_context, 
+                       pAdjustMethod, 
+                       ontology, 
+                       keytype){
+                data <- try(convert_to_enrichresult(biologic_context[[y]],
+                                                pAdjustMethod))
+                if (class(data) != "data.frame"){
+                  data
+                } else {
+                result <- new("enrichResult",
+                              result = data,
+                              organism = "human",
+                              pAdjustMethod = pAdjustMethod,
+                              pvalueCutoff = 1,
+                              qvalueCutoff = 1,
+                              gene = x,
+                              ontology = ontology,
+                              keytype = keytype)
+                enrichplot::pairwise_termsim(result)}
+              },
+              biologic_context = biologic_context_GO_MF,
+              pAdjustMethod = pAdjustMethod,
+              ontology = annotation,
+              keytype = idType)
+
+enrich_result %>%
+  export(here::here(resultsdir, "DAVID_RESULTS_MF_MODULES_enrichResult.RDS"))
+
+
+biologic_context_GO_MF <- lists %>%
+  purrr::map(function(x){
+    position <- which(x == lists)
+    setCurrentGeneListPosition(david, position)
+    try(getClusterReport(david))
+  }) %T>%
+  export(here::here(resultsdir, "DAVID_RESULTS_MF_MODULES_cluster.RDS"))
+
+
+```
+
+# Biologic context of the modules using clusterprofiler
+
+```{r biologic_context_clusterprofiler}
+library(Biobase)
+library(genefilter)
+library(clusterProfiler)
+library(WGCNA)
+library(Biobase)
+library(org.Hs.eg.db)
+
+net <- import(here::here(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+eset <- import(here::here(datadir, "E-GEOD-51401.ExpressionSet.outlierremoved.RDS")) %>%
+  featureFilter()
+
+selected_features <- fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA', GENENAME)) %>%
+  dplyr::select(PROBEID) %>%
+  deframe()
+
+universe <- eset[selected_features,] %>%
+  fData() %>%
+  dplyr::select(PROBEID, ENTREZID) %>%
+  deframe()
+
+genes <- data.frame(module = paste("M", net$refinedColors, sep = ""),
+                    gene = fData(net$eset)$ENTREZID) %>%
+  dplyr::filter(module != "M0") %>%
+  nest(gg = -"module") %>%
+  deframe %>%
+  purrr::map(deframe)
+
+biologic_context_BP <- genes %>%
+  purrr::map(function(x){
+    try(enrichGO(x,
+                 OrgDb = "org.Hs.eg.db",
+                 ont = "BP",
+                 pvalueCutoff = 1,
+                 qvalueCutoff = 1,
+                 readable = TRUE
+                 ))
+  })
+
+biologic_context_BP %>%
+  rio::export(here::here(resultsdir, "CLUSTERPROFILER_RESULTS_BP_MODULES.RDS"))
+
+```
+
+# GO term reduction modules using umap
+
+```{r go_term_reduction_modules_clusterprofiler}
+library(GOSemSim)
+library(tidygraph)
+library(rrvgo)
+library(umap)
+
+biologic_context_GO_BP <- import(here::here(resultsdir, "CLUSTERPROFILER_RESULTS_BP_MODULES.RDS")) %>%
+  purrr::map(function(x){
+    x %>% data.frame(stringsAsFactors = FALSE) %>%
+      dplyr::filter(p.adjust < 0.05)
+  })
+
+selected <- lapply(biologic_context_GO_BP, nrow) > 3
+
+biologic_context_GO_BP <- biologic_context_GO_BP %>%
+  extract(selected)
+
+scores <- biologic_context_GO_BP %>%
+  purrr::map(function(x){
+    x %>% 
+      mutate(adj.P.Val = -log10(p.adjust)) %>%
+      dplyr::select(ID, adj.P.Val) %>%
+      dplyr::rename(go = ID)
+  })
+
+d <- GOSemSim::godata("org.Hs.eg.db", 
+                      ont = "BP")
+
+sim_matrices <- biologic_context_GO_BP %>%
+  purrr::map(function(x){
+      calculateSimMatrix(x$ID,
+                         orgdb = "org.Hs.eg.db",
+                         semdata = d,
+                         ont = "BP",
+                         method = "Wang")
+  })
+
+sim_matrices %>%
+  rio::export(here::here(resultsdir, "sim_matrices_CLUSTERPROFILER_modules.RDS"))
+
+config <- umap.defaults
+config$n_neighbors <- 10
+
+umap_results <- sim_matrices %>%
+  purrr::map(function(x){
+    umap <- try(umap(x,
+                     config = config))
+    if (class(umap) == "umap"){
+      cluster <- fpc::dbscan(umap$layout, 
+                eps = 0.6, 
+                MinPts = 5)
+    cbind(umap$layout, cluster$cluster) %>%
+      data.frame(stringsAsFactors = FALSE) %>%
+      set_names(c("x", "y", "cluster")) %>%
+      rownames_to_column("go")}
+    else {NULL}
+  })
+
+selected <- lapply(umap_results, is.null) %>%
+  unlist() %>%
+  !.
+selected <- names(selected)[selected]
+
+sim_matrices <- sim_matrices[selected]
+scores <- scores[selected]
+
+reduced_terms <- sim_matrices %>%
+  purrr::map2(scores,
+              function(x,y){
+                scores <- y %>%
+                  deframe()
+                reduceSimMatrix_umap(x,
+                                     scores = scores,
+                                     orgdb = "org.Hs.eg.db",
+                                     config = config)
+    })
+
+reduced_terms %>%
+  rio::export(here::here(resultsdir, "reduced_terms_CLUSTERPROFILER_modules.RDS"))
+
+```
+
+# Verification by RNASeq data
+
+```{r analyse_rnaseq}
+library(DESeq2)
+
+
+# import the count matrix
+
+count_matrix <- import(here::here(datadir, "RNASeq.RDS"))
+
+
+
+pdata <- count_matrix %>%
+  colnames() %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  set_names("name") %>%
+  mutate(patient = case_when(str_detect(name, "301") ~ "301",
+                             str_detect(name, "304") ~ "304",
+                             str_detect(name, "308") ~ "308",
+                             str_detect(name, "309") ~ "309",
+                             str_detect(name, "310") ~ "311",
+                             str_detect(name, "311") ~ "311",
+                             str_detect(name, "315") ~ "315",
+                             str_detect(name, "325") ~ "325",
+                             str_detect(name, "BP1") ~ "BIO",
+                             str_detect(name, "Bio") ~ "BIO",
+                             str_detect(name, "HCC_2") ~ "HCC2",
+                             str_detect(name, "HCCP1") ~ "HCCP1",
+                             str_detect(name, "HCCP2") ~ "HCCP2",
+                             str_detect(name, "ASGR1_CD45_UNB_P4_5|ASGR1_CD45_UNB_P4_6|ASGR1_CD45_UNB_P4_7|ASGR1_CD45_UNB_P4_8|CD45NEG_ASGR1_P7_14|CD45_NPC_P5_10|CD45_NPC_P5_11|CD45_NPC_P5_12|CD45_NPC_P5_9|ASGR1pos_4|ASGR1posfresh_4|CD34pos325frsh_10|CD34pos325fresh_11|CD34pos325frsh_12|CD34pos325fresh_9|CD45posfresh_5|CD45posfresh_6|CD45posfresh_7|CD45posfresh_8|EPCAMTrop2high_2|EPCAMTrop2int_1|EPCAMTrop2low_3|EPCAMhighfresh_2|EPCAMintfresh_1|EPCAMlowfresh_3|LSECfresh_10|LSECfresh_11|LSECfresh_12|LSECfresh_9|PHH_UNB_1|PHH_UNB_2|PHH_UNB_3|PHH_UNB_4|ASGR1pos325_1|ASGR1pos325_2|ASGR1posCD45neg_10|ASGR1posCD45neg_9|ASGR1posCD45pos_11|ASGR1posCD45pos_12|CD34pos_10|CD34pos_9|CD45pos325_5|CD45pos325_6|CD45pos325_7|CD45pos325_8|EPCAMhigh325_14|EPCAMint325325_13|EPCAMlow325_15|LSEC325_13|LSEC325_14|LSEC325_15|LSEC325_16|Mixed325_1|Mixed325_2|Mixed325_3|Mixed325_4") ~ "325",
+                             TRUE ~ "UNKNOWN")) %>%
+  mutate(condition = case_when(str_detect(patient, "HCC") ~ "HCC",
+                               TRUE ~ "CONTROL"))
+
+
+
+# calculate the pseudo-bulk RNASeq
+
+groups <- pdata$patient
+
+count_matrix <- count_matrix[rowSums(count_matrix > 1) >= 10, ]
+
+count_matrix_bulk <- count_matrix %>%
+  rownames_to_column("SYMBOL") %>%
+  pivot_longer(cols = c(!SYMBOL)) %>%
+  inner_join(pdata) %>%
+  group_by(patient, SYMBOL) %>%
+  summarise(counts = sum(value)) %>%
+  pivot_wider(names_from = "patient",
+              values_from = "counts") %>%
+  column_to_rownames("SYMBOL")
+
+count_matrix_bulk %>%
+  rio::export(here::here(datadir, "count_matrix_bulkRNASeq.RDS"))
+
+colData <- pdata %>%
+  dplyr::select(patient, condition) %>%
+  distinct() %>%
+  mutate(rowname = patient) %>%
+  column_to_rownames()
+
+dds <- count_matrix_bulk %>%
+  DESeqDataSetFromMatrix(colData[colnames(.),],
+                         design = ~condition)
+
+# generate the sample annotation
+
+dds <- dds %>%
+  DESeq()
+
+result <- results(dds) %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  rownames_to_column("SYMBOL")
+
+result %>%
+  rio::export(here::here(resultsdir, "RNASeq_Result.xlsx"))
+
+# perform differential gene expression analysis
+```
+
+
+
+
+# construct ppi networks
+
+```{r construct_ppi_networks}
+
+# get the PPI from STRING
+string_network <- rio::import(here::here(datadir, "9606.protein.links.full.v11.0.txt.gz"),
+                       sep = " ")
+
+string_network_filtered <- string_network %>%
+  dplyr::filter(protein1 %in% genes$STRING_id & protein2 %in% genes$STRING_id) %>%
+  dplyr::filter(combined_score > 200) %>%
+  select(-combined_score) %>%
+  pivot_longer(!starts_with("protein"),
+               names_to = "type",
+               values_to = "score") %>%
+  dplyr::filter(score > 0) %>%
+  mutate(type = str_replace(type, "_transferred", "")) %>%
+  group_by(protein1, protein2, type) %>%
+  summarize(score = max(score)) %>%
+  ungroup() %>%
+  as_tbl_graph(directed = FALSE)
+
+
+rm(adjacency)
+gc()
+```
+
+# construct networks
+
+```{r construct_networks}
+library(Biobase)
+library(tidygraph)
+library(WGCNA)
+library(igraph)
+library(STRINGdb)
+
+##### BEGIN Biologic context ---------------------------------------
+net <- readRDS(file.path(resultsdir, 
+                         paste(accession, 
+                               "net", 
+                               "RDS", 
+                               sep = ".")))
+
+moduleColors = paste("M", net$refinedColors, sep = "")
+
+# define th palettes
+palette_black <- RColorBrewer::brewer.pal(n = 8, name = "Greys") %>%
+  colorRampPalette()
+palette_red <- RColorBrewer::brewer.pal(n=8, name = "Reds") %>%
+  colorRampPalette()
+
+string_db <- STRINGdb$new(version="11", 
+                          species=9606,
+                          score_threshold=200, 
+                          input_directory="")
+
+# map stringDB identifiers to ENTREZID and SYMBOL
+genes <- data.frame(PROBEID = fData(net$eset)$PROBEID,
+                    ENTREZID = fData(net$eset)$ENTREZID,
+                    MODULE = moduleColors) %>%
+  filter(MODULE != "grey") %>%
+  string_db$map("ENTREZID",
+                removeUnmappedRows = TRUE) %>%
+  group_by(STRING_id) %>%
+  summarise(PROBEID = paste(PROBEID, collapse = ","), 
+            ENTREZID =paste(ENTREZID, collapse = ","), 
+            MODULE = paste(MODULE, collapse = ",")) %>%
+  ungroup()
+
+# query stringDB, get the PPI and convert it to ENTREZIDs
+ppi_probeid <- string_db$get_graph() %>%
+  as_long_data_frame() %>%
+  set_names(c("from", "to", "combined_score", "from_name", "to_name")) %>%
+  inner_join(genes, by =c("from_name" = "STRING_id")) %>%
+  select(-MODULE, -ENTREZID) %>%
+  rename(from_PROBEID = PROBEID) %>%
+  inner_join(genes, by =c("to_name" = "STRING_id")) %>%
+  select(-MODULE, -ENTREZID) %>%
+  rename(to_PROBEID = PROBEID) %>%
+  select(-from, -to, -from_name, -to_name) %>%
+  rename(from = from_PROBEID) %>%
+  rename(to = to_PROBEID) %>%
+  mutate(PPI = TRUE)
+
+adjacency <- net$params$datExpr %>%
+  WGCNA::adjacency(type = net$params$networkType,
+                   power = net$params$power,
+                   corFnc = net$params$corType)
+
+# construct a dataframe of Konnectivities from the adjacency
+
+connectivity <-  adjacency %>%
+  intramodularConnectivity(moduleColors) %>%
+  rownames_to_column("name") %>%
+  mutate(module = moduleColors) %>%
+  group_by(module) %>%
+  mutate(kWithin.norm = kWithin/max(kWithin)) %>%
+  ungroup() %>%
+  select(name, kTotal, kWithin, kWithin.norm, kOut, kDiff, module)
+
+# reduce the adjacency to assigned genes
+
+adjacency <- adjacency[moduleColors != "M0", moduleColors != "M0"]
+
+gc()
+# calculate the network from  adjacency
+
+network <- adjacency %>%
+  as_tbl_graph(directed = FALSE) %>%
+  as_long_data_frame() %>%
+  set_names(c("from", "to", "weight", "from_PROBEID", "to_PROBEID")) %>%
+  dplyr::select(-from, -to) %>%
+  rename(from = from_PROBEID) %>%
+  rename(to = to_PROBEID) %>%
+  left_join(ppi_probeid) %>%
+  mutate(PPI = ifelse(is.na(PPI), FALSE, PPI)) %>%
+  mutate(combined_score = ifelse(is.na(combined_score), 0, combined_score)) %>%
+  mutate(COLOR = ifelse(PPI, 
+                        val2col(weight, c(0,1), palette_red(99)),
+                        val2col(weight, c(0,1), palette_black(99)))) %>%
+  as_tbl_graph(directed = FALSE) %>%
+  activate(nodes) %>%
+  inner_join(connectivity) %>%
+  inner_join(fData(net$eset), by = c("name" = "PROBEID")) 
+
+network %>%
+  export(file.path(resultsdir, 
+                    paste(accession, 
+                          "network.RDS", 
+
+                          sep = ".")))
+
+
+
+string_network <- rio::import(here::here(datadir, "9606.protein.links.full.v11.0.txt.gz"),
+                       sep = " ")
+
+string_network_filtered <- string_network %>%
+  dplyr::filter(protein1 %in% genes$STRING_id & protein2 %in% genes$STRING_id) %>%
+  dplyr::filter(combined_score > 200) %>%
+  select(-combined_score) %>%
+  pivot_longer(!starts_with("protein"),
+               names_to = "type",
+               values_to = "score") %>%
+  dplyr::filter(score > 0) %>%
+  mutate(type = str_replace(type, "_transferred", "")) %>%
+  group_by(protein1, protein2, type) %>%
+  summarize(score = max(score)) %>%
+  ungroup() %>%
+  as_tbl_graph(directed = FALSE) %>%
+  activate("nodes") %>%
+  inner_join(genes, by = c("name" = "STRING_id")) %>%
+  inner_join(fData(net$eset))
+
+string_network_filtered %>%
+  export(file.path(resultsdir, 
+                    paste(accession, 
+                          "network_ppi.RDS", 
+                          sep = ".")))
+  
+
+#### END Network construction -------------------------------------
+# clean up memory
+rm(adjacency)
+gc()
+```
+
+
+# druggable genes
+
+```{r druggable_genes}
+library(tidyverse)
+library(rDGIdb)
+library(magrittr)
+library(tidygraph)
+library(rio)
+# load the networks
+network <- readRDS(file.path(resultsdir, paste(accession, "network.RDS", sep = ".")))
+
+# extract hubgenes
+genes <- network %>%
+  activate(nodes) %>%
+  data.frame %>%
+  dplyr::select(module, SYMBOL)
+
+# query DGIdb
+result <- genes$SYMBOL %>%
+  queryDGIdb() 
+
+result %>%
+  export(file.path(resultsdir, "DGIDB.result.RDS"))
+
+detailedResult <- result %>%
+  detailedResults %>%
+  rename(SYMBOL = Gene) %>%
+  inner_join(genes) %>%
+  tidyr::nest(gg = -"module") %>%
+  mutate_at(
+    "gg",
+    purrr::map,
+    function(x) data.frame(x,stringsAsFactors = FALSE)
+  ) %>%
+  deframe() %>%
+  .[order(names(.))] 
+
+detailedResult %>%
+  export(file.path(label, "drugs.xlsx"))
+```

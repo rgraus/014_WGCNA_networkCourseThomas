@@ -1,0 +1,16 @@
+# Ignore a directory (replace 'directoryname' with your directory's name)
+.Rproj.user/
+014_WGCNA_networkCourseThomas_out/
+# Ignore Rproj files
+*.Rproj
+*.RData
+*.Rhistory
+# Ignore PDF files
+*.pdf
+*.zip
+*.RDS
+# Ignore PNG files
+*.png
+*.odp
+*.pptx
+

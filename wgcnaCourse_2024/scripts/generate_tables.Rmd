@@ -1,0 +1,553 @@
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	include = FALSE
+)
+library(tidyverse)
+library(magrittr)
+library(rio)
+
+convert_to_enrichresult <- function(x, 
+                                    pAdjustMethod = "BH",
+                                    sep = "~"){
+  require(qvalue)
+  require(tidyverse)
+  Over <- x %>%
+    data.frame(stringsAsFactors = FALSE) %>%
+    mutate(GeneRatio = paste(Count, List.Total, sep = "/")) %>%
+    mutate(BgRatio = paste(Pop.Hits, Pop.Total, sep = "/")) %>%
+    dplyr::rename(pvalue = PValue) %>%
+    mutate(pvalue = as.numeric(pvalue)) %>%
+    mutate(geneID = str_replace_all(Genes, ",\\s*", "/")) %>%
+    mutate(p.adjust = case_when(pAdjustMethod == "bonferroni" ~ Bonferroni, 
+                                TRUE ~ Benjamini)) %>%
+    separate(Term, into = c("ID", "Description"), sep = "~") %>%
+    mutate(rowname = ID) %>%
+    column_to_rownames()
+  qobj <- tryCatch(qvalue(p = Over$pvalue, 
+                          lambda = 0.05, 
+                          pi0.method = "bootstrap"), 
+                   error = function(e) NULL)
+  if (class(qobj) == "qvalue") {
+    qvalues <- qobj$qvalues
+  } else {
+    qvalues <- NA
+  }
+  Over$qvalue <- qvalues
+  Over %>%
+    dplyr::select(ID, 
+                  Description, 
+                  GeneRatio,
+                  pvalue,
+                  p.adjust,
+                  qvalue,
+                  geneID,
+                  Count)
+}
+
+```
+
+
+```{r initialize_project}
+
+source("InitializeProject.R")
+
+# project specific parameters
+accession <- c("E-GEOD-51401")
+label <- "MDPI"
+font_size <- 10 # default font size in points
+base_size <- 10 # default basic font_size
+width <- 8  # default figure width in cm
+dpi <- 450    # figure density
+panel_label <- "AUTO"  # default label format
+showCategory = 15
+
+heatmap_data <- import(file.path(resultsdir, 
+                   paste(accession, 
+                         "association", 
+                         "RDS", 
+                         sep = ".")))
+modules_location_up <- heatmap_data %>% 
+  dplyr::filter(X == "CELLTYPE") %>%
+  slice_max(value, 
+            n = 2) %>%
+  select(Y) %>%
+  deframe()
+modules_activation_up <- heatmap_data %>% 
+  dplyr::filter(X == "MARKER") %>%
+  slice_max(value, 
+            n = 2) %>%
+  select(Y) %>%
+  deframe()
+modules_location_down <- heatmap_data %>% 
+  dplyr::filter(X == "CELLTYPE") %>%
+  slice_min(value, 
+            n = 1) %>%
+  select(Y) %>%
+  deframe()
+modules_activation_down <- heatmap_data %>% 
+  dplyr::filter(X == "MARKER") %>%
+  slice_min(value, 
+            n = 1) %>%
+  select(Y) %>%
+  deframe()
+```
+
+# make population table
+
+```{r population_table, include=TRUE}
+library(kableExtra)
+library(Biobase)
+pdata <- import(here::here(datadir, "pdata.csv")) %>%
+  dplyr::filter(CELLTYPE %in% c("TEC", "NEC"))
+
+eset <- import(here::here(datadir, paste(accession, "ExpressionSet", "outlierremoved.RDS", sep = ".")))
+
+pdata <- pdata %>%
+  dplyr::mutate(selected = SAMPLEID %in% sampleNames(eset))
+
+patients <- pdata %>%
+  dplyr::select(PATID, GENDER, AGE) %>%
+  distinct() %>%
+  mutate(GENDER = factor(GENDER, levels = c("F", "M")))
+
+totals <- patients %>%
+  summarise(age = median(AGE))
+
+table <- patients %>%
+  group_by(GENDER) %>%
+  summarise(n = n(),
+            `median age` = median(AGE)) %>%
+  add_row(GENDER = "Total",
+          n = sum(.$n),
+          `median age` = totals$age)
+
+
+summary.total <- pdata %>%
+  mutate(GENDER == factor(GENDER, levels = c("F", "M")),
+         MARKER == factor(MARKER, levels = c("CD31", "CD105")),
+         CELLTYPE == factor(CELLTYPE, levels = c("NEC", "TEC"))) %>%
+  group_by(GENDER, CELLTYPE, MARKER) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = c(CELLTYPE, MARKER),
+              names_sep = ".",
+              values_from = "n") %>%
+  dplyr::select(GENDER, NEC.CD31, NEC.CD105, TEC.CD31, TEC.CD105) %>%
+  add_row(GENDER = "Total",
+          NEC.CD31 = sum(.$NEC.CD31),
+          TEC.CD31 = sum(.$TEC.CD31),
+          NEC.CD105 = sum(.$NEC.CD105),
+          TEC.CD105 = sum(.$TEC.CD105)) %>%
+  data.frame()
+
+summary.total.accepted <- pdata %>%
+  dplyr::filter(selected) %>%
+  mutate(GENDER == factor(GENDER, levels = c("F", "M")),
+         MARKER == factor(MARKER, levels = c("CD31", "CD105")),
+         CELLTYPE == factor(CELLTYPE, levels = c("NEC", "TEC"))) %>%
+  group_by(GENDER, CELLTYPE, MARKER) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = c(CELLTYPE, MARKER),
+              names_sep = ".",
+              values_from = "n") %>%
+  dplyr::select(GENDER, NEC.CD31, NEC.CD105, TEC.CD31, TEC.CD105) %>%
+  add_row(GENDER = "Total",
+          NEC.CD31 = sum(.$NEC.CD31),
+          TEC.CD31 = sum(.$TEC.CD31),
+          NEC.CD105 = sum(.$NEC.CD105),
+          TEC.CD105 = sum(.$TEC.CD105)) %>%
+  data.frame()
+
+for (i in 2:ncol(summary.total)){
+  summary.total[,i] <- paste(summary.total.accepted[,i], summary.total[,i], sep = "/")
+}
+
+summary <- table %>%
+  right_join(summary.total) %>%
+  set_names(c("gender", "n", "median age (years)", "ENG\\textsuperscript{-}", "ENG\\textsuperscript{+}", "ENG\\textsuperscript{-}", "ENG\\textsuperscript{+}"))
+
+# make the indices
+
+summary[1,6] <- paste(summary[1,6], "textsuperscript{1}", sep = "\\")
+summary[2,4] <- paste(summary[2,4], "textsuperscript{2}", sep = "\\")
+summary[2,6] <- paste(summary[2,6], "textsuperscript{3}", sep = "\\")
+summary[2,7] <- paste(summary[2,7], "textsuperscript{4}", sep = "\\")
+
+
+summary %>%
+  export(here::here(resultsdir, "table_study_cohort.RDS"))
+
+
+table_population_characteristics <- summary %>% kable(format = 'latex',
+          align=c("l", "c", "c", "c", "c", "c", "c"),
+          booktabs = TRUE,
+          escape = FALSE,
+          caption = "Characteristics of the study cohort. Numbers before the slash represent the number of used samples, numbers after the slash represent the number of total samples.",
+          label = "tab1") %>%
+  add_header_above(header = c(" " = 3, 
+                              "non-tumour endothelial cells (NEC)" = 2, 
+                              "tumour endothelial cells (TEC)" = 2),
+                   escape = FALSE) %>%
+  kable_styling(latex_options=c("scale_down",
+                                "HOLD_position")) %>%
+  column_spec(1, width="1cm") %>%
+  column_spec(2, width="1cm") %>%
+  column_spec(3, width="1cm") %>%
+  column_spec(4, width="5cm") %>%
+  column_spec(5, width="5cm") %>%
+  column_spec(6, width="5cm") %>%
+  column_spec(7, width="5cm") %>%
+  add_footnote(c("Sample GSM1244757 (from Patient 8) was excluded due to unequal hybridization, as detected in spatial distribution plots.",
+                 "Sample GSM1244761 (from Patient 9) was excluded due to excessive spans of the relative log expression (RLE) distribution and the normalized unscaled standard error (NUSE) distribution",
+                 "Sample GSM1244763 (from Patient 9) was excluded due to excessive distance to the other samples in the PCA as well as an excessive NUSE.",
+                 "Sample GSM1244737 (from Patient 3) was excluded due to excessive distance to the other samples in the PCA. Sample GSM1244746 (from Patient 5) was excluded due to excessive spans of the relative log expression (RLE) distribution and the normalized unscaled standard error (NUSE) distribution."), 
+               notation = "number")
+table_population_characteristics %>%
+  rio::export(here::here(label, "table_population_characteristics.RDS"))
+
+table_population_characteristics
+```
+
+
+# make lead terms table
+
+```{r make_lead_terms_GSVA}
+library(kableExtra)
+library(Biobase)
+
+gsva_result <- rio::import_list(here::here(label, "S2.xlsx")) %>%
+  bind_rows(.id = "CONTRAST") %>%
+  group_by(CONTRAST, cluster) %>%
+  slice_min(adj.P.Val) %>%
+  arrange(cluster,
+          .by_group = TRUE) %>%
+  ungroup() %>%
+  mutate(CONTRAST = str_replace(CONTRAST,"_up", "")) %>%
+  mutate(CONTRAST = str_replace(CONTRAST,"_down", "")) %>%
+  select(CONTRAST, Term, logFC, adj.P.Val, cluster) %>%
+  nest(gg = -"CONTRAST") %>%
+  deframe()
+
+```
+
+
+# make drugable genes table
+
+```{r generate_drugtables, include=TRUE}
+library(tidygraph)
+library(kableExtra)
+library(rDGIdb)
+str_trim <- function(x, sep = ","){
+  
+  x %>% 
+    str_split(sep) %>%
+    unlist() %>%
+    unique() %>%
+    paste0(collapse = sep) %>%
+    gsub(paste0("^", sep, "*|(?<=", sep, ")", sep, "|", sep, "*$"),
+              "", ., perl=T)
+}
+
+threshold <- 0.05
+
+network <- readRDS(file.path(resultsdir, paste(accession, "network.RDS", sep = ".")))
+
+DGIDB <- readRDS(file.path(resultsdir, "DGIDB.result.RDS"))
+
+network_filtered <- network %>%
+  activate("nodes") %>%
+  arrange(desc(kWithin.norm)) %>%
+  group_by(module) %>%
+  filter(row_number()/n() <= threshold) %>%
+  ungroup
+
+
+drugableGenes <- network_filtered %>%
+  activate("nodes") %>%
+  tidygraph::as_tibble() %>%
+  inner_join(DGIDB %>%
+               detailedResults(), 
+            by = c("SYMBOL" = "Gene")) %>%
+  dplyr::filter(!str_detect(Drug, "CHEMBL")) %>%
+  dplyr::select(SYMBOL, GENENAME, Drug, Source, PMIDs, module, kWithin.norm)#
+
+drugableGenes %>%
+  rio::export(here::here(resultsdir, "drugable_genes.xlsx"))
+  
+# define connectivity threshold
+
+# extract hubgenes
+drugableGenes <- network_filtered %>%
+  activate("nodes") %>%
+  tidygraph::as_tibble() %>%
+  inner_join(DGIDB %>%
+               detailedResults(), 
+            by = c("SYMBOL" = "Gene")) %>%
+  dplyr::filter(module %in% c(modules_activation_up, modules_location_up)) %>%
+  dplyr::filter(str_detect(Drug, "CHEMBL", negate = TRUE)) %>%
+  dplyr::select(module, SYMBOL, GENENAME, Drug, Source, PMIDs, kWithin.norm) %>%
+  group_by(module, SYMBOL, GENENAME, kWithin.norm) %>%
+  summarise(Drug = str_trim(paste0(Drug, collapse = ",")),
+            Source = str_trim(paste0(Source, collapse = ",")),
+            PMIDs = str_trim(paste0(PMIDs, collapse = ","))) %>%
+  ungroup() %>%
+  mutate(Drug = str_replace_all(Drug, ",", ", ")) %>%
+  mutate(Source = str_replace_all(Source, ",", ", ")) %>%
+  mutate(PMIDs = str_replace_all(PMIDs, ",", ", ")) %>%
+  mutate(Drug = str_replace_all(Drug, "  ", " ")) %>%
+  mutate(Source = str_replace_all(Source, "  ", " ")) %>%
+  mutate(PMIDs = str_replace_all(PMIDs, "  ", " ")) %>%
+  group_by(module) %>%
+  arrange(GENENAME, .by_group = TRUE) %>%
+  ungroup() %>%
+  rename('Normalized Connectivity' = kWithin.norm,
+         'Gene Name' = GENENAME,
+         'Gene Symbol' = SYMBOL) 
+
+drugableGenes %>%
+  export(here::here(resultsdir, "table_drugable_genes.RDS"))
+   
+index <- c(intersect(modules_location_up, drugableGenes$module),
+           intersect(modules_activation_up, drugableGenes$module))
+
+drugableGenes <- drugableGenes %>%
+  mutate(module = factor(module, levels = index))
+
+index <- table(paste("Module:", drugableGenes$module))
+
+table_drugable_genes <- drugableGenes %>%
+  dplyr::select("Gene Symbol", "Gene Name", Drug, PMIDs) %>%
+  kable(format = 'latex',
+        digits = 3,
+        align=c("l", "l", "l", "l"),
+        booktabs = TRUE,
+        caption = "Potentially drugable hub genes in network modules positively associated with cell origin or angiogenic activation and the respective drugs.",
+        label = "drugable_genes") %>%
+  kable_styling(latex_options=c("scale_down",
+                                "HOLD_position")) %>%
+  pack_rows(index = index,
+            hline_before = TRUE) %>%
+  column_spec(1, width="10em") %>%
+  column_spec(2, width="10em") %>%
+  column_spec(3, width="60em") %>%
+  column_spec(4, width="40em")
+
+table_drugable_genes %>%
+  export(here::here(label, "table_drugable_genes.RDS"))
+  
+
+
+# table_drugable_genes
+```
+
+# make supplementary table S1 - LIMMA
+
+```{r generate_S1_limma}
+library(WGCNA)
+
+
+net <- rio::import(here::here(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+net_data <- data.frame(PROBEID = names(net$refinedColors),
+                       module = paste("M", net$refinedColors, sep = ""),
+                       stringsAsFactors = FALSE)
+konnectivity <- WGCNA::adjacency(net$param$datExpr,
+                                 power = net$params$power,
+                                 corFnc = net$params$corType,
+                                 type = net$params$networkType) %>%
+  intramodularConnectivity(net_data$module) %>%
+  rownames_to_column("PROBEID")
+
+table <- import(here::here(resultsdir, paste(accession, "limmaresult.RDS", sep = "."))) %>%
+  bind_rows(.id = "CONTRAST") %>%
+  dplyr::select("CONTRAST",
+                "PROBEID",
+                "ACCNUM",
+                "ENTREZID",
+                "ENSEMBL",
+                "ENSEMBLTRANS",
+                "REFSEQ",
+                "SYMBOL",
+                "GENENAME",
+                "UNIPROT",
+                "logFC",
+                "AveExpr",
+                "t",
+                "P.Value",
+                "adj.P.Val",
+                "B" ) %>%
+  inner_join(net_data) %>%
+  inner_join(konnectivity) %>%
+  dplyr::select(-kOut,
+                -kDiff) %>%
+  # dplyr::filter(CONTRAST %in% c("TEC.CD31vsNEC.CD31", "TEC.CD105vsNEC.CD105")) %>%
+  tidyr::nest(gg = -"CONTRAST") %>%
+  deframe() %>%
+  purrr::map(function(x){ 
+    x %>%
+    group_by(module) %>%
+      mutate(kWithin.norm = kWithin / max(kWithin))
+  })
+  
+table  %>%
+  rio::export(here::here(label, "S1.xlsx"))
+
+```
+
+# Calculate LIMMA overlaps
+
+```{r calculate LIMMA overlaps}
+table  <- 
+  rio::import_list(here::here(label, "S1.xlsx")) %>%
+  bind_rows(.id = "CONTRAST") %>%
+  dplyr::filter(CONTRAST %in% c("NEC.CD105vsNEC.CD31", "TEC.CD105vsTEC.CD31"),
+                adj.P.Val < 0.05,
+                abs(logFC) > 2) %>%
+  dplyr::select(CONTRAST, SYMBOL) %>%
+  tidyr::nest(gg = -"CONTRAST") %>%
+  deframe() %>%
+  purrr::map(deframe)
+
+
+```
+
+
+# make supplementary table S2 - GSVA Analysis
+
+```{r generate_S2_clusterprofiler}
+library(clusterProfiler)
+GSVA_result <- import(here::here(resultsdir, "E-GEOD-51401.limmaresult_PATHWAYS_GSVA.RDS")) %>%
+  extract(c("TEC.CD31vsNEC.CD31",
+            "TEC.CD105vsNEC.CD105")) %>%
+  purrr::map(function(x){
+    x %>%
+      group_by(Hallmark) %>%
+      arrange(adj.P.Val, .by_group = TRUE) %>%
+      ungroup()
+  })
+
+
+#  bind_rows(.id = "CONTRAST")
+#
+#S2_up <- GSVA_result %>%
+#  mutate(CONTRAST = paste(CONTRAST, "up", sep = "_")) %>%
+#  dplyr::select(CONTRAST, 
+#                go_id,
+#                Term,
+#                parentTerm,
+#                logFC,
+#                t,
+#                P.Value,
+#                adj.P.Val,
+#                B,
+#                cluster) %>%
+#  nest(gg = -"CONTRAST") %>%
+#  deframe() %>%
+#  purrr::map(function(x){
+#    x %>%
+#      group_by(cluster) %>%
+#      arrange(adj.P.Val, .by_group = TRUE)
+#  })
+
+#reduced_terms_down <- import(here::here(resultsdir, "reduced_terms_GSVA_down.RDS")) %>% #extract(c("TEC.CD31vsNEC.CD31",
+#            "TEC.CD105vsNEC.CD105")) %>%
+#  bind_rows(.id = "CONTRAST") %>%
+#  rename(go_id = go)
+#
+#S2_down <- GSVA_result %>%
+#  inner_join(reduced_terms_down,
+#             by = c("CONTRAST" = "CONTRAST",
+#                    "go_id" = "go_id")) %>%
+#  mutate(CONTRAST = paste(CONTRAST, "down", sep = "_")) %>%
+#  dplyr::select(CONTRAST,
+#                go_id,
+#                Term,
+#                parentTerm,
+#                logFC,
+#                t,
+#                P.Value,
+#                adj.P.Val,
+#                B,
+#                cluster) %>%
+#  nest(gg = -"CONTRAST") %>%
+#  deframe() %>%
+#  purrr::map(function(x){
+#    x %>%
+#      group_by(cluster) %>%
+#      arrange(adj.P.Val, .by_group = TRUE)
+#  })
+
+GSVA_result %>%
+  rio::export(here::here(label, "S2.xlsx"))
+
+```
+
+# make supplementary table S3 - clusterProfiler Results Modules
+
+```{r generate_S3`, eval=FALSE, include=FALSE}
+
+biologic_context_GO_BP <- import(here::here(resultsdir, "CLUSTERPROFILER_RESULTS_BP_MODULES.RDS")) %>%
+  purrr::map(data.frame) %>%
+  bind_rows(.id = "MODULE")
+
+
+reduced_terms <- import(here::here(resultsdir, "reduced_terms_CLUSTERPROFILER_modules.RDS")) %>%
+  bind_rows(.id = "MODULE") %>%
+  dplyr::rename(ID = go)
+
+S3 <- biologic_context_GO_BP %>%
+  left_join(reduced_terms) %>%
+  arrange(MODULE) %>%
+  dplyr::select(MODULE,
+                ID,
+                Description,
+                GeneRatio,
+                BgRatio,
+                pvalue,
+                p.adjust,
+                qvalue,
+                geneID,
+                Count,
+                cluster,
+                parent,
+                parentTerm) %>%
+  nest(gg = -"MODULE") %>%
+  deframe() %>%
+  purrr::map(data.frame)
+
+S3 %>%
+  export(here::here(label, "S3.xlsx"))
+```
+
+# make supplementary table S4 - potentially drugable genes 
+
+```{r make_S4}
+library(rDGIdb)
+library(tidygraph)
+
+network <- readRDS(file.path(resultsdir, paste(accession, "network.RDS", sep = ".")))
+DGIDB <- readRDS(file.path(resultsdir, "DGIDB.result.RDS")) %>%
+  detailedResults
+
+drugableGenes <- network %>%
+  activate("nodes") %>%
+  data.frame %>%
+  inner_join(DGIDB,
+            by = c("SYMBOL" = "Gene")) %>%
+  dplyr::select(SYMBOL, GENENAME, Drug, Source, PMIDs, module, kWithin.norm) %>%
+  arrange(module) %>%
+  nest(gg = -"module") %>%
+  deframe %>%
+  purrr::map(data.frame)
+
+drugableGenes %>%
+   export(here::here(label, "S4.xlsx"))
+
+```
+

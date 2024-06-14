@@ -1,0 +1,53 @@
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+source(here::here("InitializeProject.R"))
+```
+
+```{r get_prostate_data}
+library(TCGAbiolinks)
+
+# query TCGA
+query <- GDCquery(project = "TCGA-PRAD",
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type  = "HTSeq - Counts")
+
+# Download data
+GDCdownload(query,
+            method = "api",
+            directory = datadir,
+            files.per.chunk = 10)
+
+# prepare the data
+data <- GDCprepare(query, directory = datadir)
+
+data %>%
+  rio::export(here::here(datadir, "TCGA-PRAD.RDS"))
+# extract the counts
+counts_matrix <- data@assays@data$`HTSeq - Counts`
+
+# extract the feature annotation
+fdata <- rowRanges(data) %>%
+  data.frame
+
+# extract the clinical data
+pdata <- colData(data) %>%
+  data.frame
+
+colnames(counts_matrix) <- pdata$sample
+rownames(counts_matrix) <- fdata$ensembl_gene_id
+
+counts_matrix %>%
+  rio::export(here::here(datadir, "TCGA-PRAD-counts.RDS"))
+
+pdata %>%
+  rio::export(here::here(datadir, "TCGA-PRAD-pdata.RDS"))
+
+fdata %>%
+  rio::export(here::here(datadir, "TCGA-PRAD-fdata.RDS"))
+```
+

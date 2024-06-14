@@ -1,0 +1,88 @@
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(magrittr)
+```
+
+```{r load_data}
+data <- rio::import(here::here(datadir, "GSE146771_CRC.Leukocyte.10x.TPM.txt.gz"),
+                    sep = " ")
+
+data %>%
+  rio::export(here::here(datadir, "GSE146771_CRC_LEUKOCYTE_10X_TPM.RDS"))
+```
+
+```{r prep_wgcna}
+library(WGCNA)
+
+enableWGCNAThreads(nThreads = 6)
+
+# load the data
+data <- rio::import(here::here(here::here(datadir, "GSE146771_CRC_LEUKOCYTE_10X_TPM.RDS")))
+
+# make sure all data are numeric
+data <- data %>%
+  mutate_if(is.character, as.numeric)
+# calculate the rowSums of the matrix
+rowSums <- rowSums(data)
+
+# filter out non or lowly expressed genes and transpose the matrix for use in WGCNA
+datExpr <- data[rowSums > 1000,] %>%
+  t
+
+# set the parameters
+
+params <- list(networkType = "unsigned",
+               corType = "bicor",
+               maxBlockSize = 21000,
+               # TOMType = "signed",
+               minModuleSize = 30,
+               reassignThreshold = 1e-6,
+               detectCutHeight = .998,
+               mergeCutHeight = 0.15,
+               deepSplit = 2,
+               numericLabels = TRUE,
+               pamStage = TRUE,
+               pamRespectsDendro = TRUE,
+               verbose = 0,
+               datExpr = datExpr)
+
+# chose the best power
+powers = c(seq(1,10,by=1), seq(12,20, by=2));
+sft = pickSoftThreshold(params$datExpr,
+                        corFnc = bicor,
+                        RsquaredCut = 0.8,
+                        powerVector=powers,
+                        networkType = params$networkType,
+                        verbose = 6)
+# extract the power estimate
+beta <- sft$powerEstimate
+
+# if the power can not be estimated, set something reasonable
+if (is.na(beta)){
+  if (params$networkType == "unsigned"){
+    beta <- 6
+  } else {
+    beta <- 12
+  }
+}
+
+# free memory
+collectGarbage();
+
+# set the power
+params$power <- beta
+
+# call the network construction
+net <- do.call(blockwiseModules, c(params))
+
+# attach the underlying parameters and data
+net$params <- as.list(args(blockwiseModules))
+net$params[names(params)] <- params
+# save the net object and we are finished
+net %>%
+  rio::export(here::here(datadir, "WGCNA.RDS"))
+```
+

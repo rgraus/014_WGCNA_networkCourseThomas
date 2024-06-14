@@ -1,0 +1,2701 @@
+---
+title: "Figures for PUB02"
+author: "Thomas Mohr"
+date: \today
+output: pdf_document
+editor_options: 
+    chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include=FALSE,
+                      echo=FALSE, 
+                      message=FALSE, 
+                      warning=FALSE)
+
+library(tidyverse)
+library(magrittr)
+library(rio)
+library(grid)
+unicode_minus <- function(x){
+  sub('^-', '\U2212', format(x))
+}
+
+scientific_10 <- function(x) {
+  x %>%
+    purrr::map_chr(function(x){
+      gsub("e", " %*% 10^", scales::scientific_format()(x))
+    })
+}
+
+```
+
+# Initialize Project
+
+```{r initialize_project}
+source("InitializeProject.R")
+
+# project specific parameters
+accession <- c("E-GEOD-51401")
+label <- "MDPI"
+page_width = 160 # page width in mm
+page_height = 220 # page height in mm
+
+base_size <- 10 # default basic font_size
+
+label_size <- convertUnit(unit(6, "pt"), "mm", 
+                          valueOnly=TRUE) # calculate the label size from point to mm
+
+label_size_genes <- 2.5
+
+tag_size <- 10 # set the tag size
+width <-  5.4 # default figure width in in
+dpi <- 450    # figure density
+tag_levels <- "A"  # default label format
+showCategory = 15
+heatmap_data <- import(file.path(resultsdir, 
+                   paste(accession, 
+                         "association", 
+                         "RDS", 
+                         sep = ".")))
+modules_location_up <- heatmap_data %>% 
+  dplyr::filter(X == "CELLTYPE") %>%
+  slice_max(value, 
+            n = 2) %>%
+  dplyr::select(Y) %>%
+  deframe()
+modules_activation_up <- heatmap_data %>% 
+  dplyr::filter(X == "MARKER") %>%
+  slice_max(value, 
+            n = 2) %>%
+  dplyr::select(Y) %>%
+  deframe()
+modules_location_down <- heatmap_data %>% 
+  dplyr::filter(X == "CELLTYPE") %>%
+  slice_min(value, 
+            n = 1) %>%
+  dplyr::select(Y) %>%
+  deframe()
+modules_activation_down <- heatmap_data %>% 
+  dplyr::filter(X == "MARKER") %>%
+  slice_min(value, 
+            n = 1) %>%
+  dplyr::select(Y) %>%
+  deframe()
+
+modules_location <- c(modules_location_up, modules_location_down)
+modules_activation <- c(modules_activation_up, modules_activation_down)
+```
+
+
+# Make LIMMA volcano plots
+
+```{r make_volcanoplots_LIMMA}
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(mdthemes)
+# load the resultstable
+results.limma <- readRDS(file = file.path(resultsdir, paste(accession, "limmaresult.RDS", sep = ".")))
+
+# input is a a list named results.limma containing the results of topTable(fit2, coef=contrast, number = nrow(fit2))
+# the object has to contain following columns: SYMBOL, logFC, adj.P.Value, additional columns are possible
+
+# number of genes to be labeled
+nLabels <- 10
+
+# cutoff for the FDR
+pValue <- 0.05
+logFClimit <- 2
+posLogFC <- "darkred"
+negLogFC <- "darkblue"
+nonSignif <- "grey"
+
+
+volcano_data <- results.limma %>%
+  
+  # convert into one dataframe
+  bind_rows(.id = "CONTRAST") %>%
+  
+  # remove the overall contrast
+  filter(CONTRAST != "overall") %>%
+  
+  # select the ceiling
+  
+  mutate(CEILING = ceiling(max(abs(logFC)))) %>%
+  
+  # select the relevant columns
+  dplyr::select(CONTRAST, SYMBOL, logFC, adj.P.Val, CEILING) %>%
+  
+  # define the coloring
+  mutate(COLOR = case_when(adj.P.Val > pValue ~ nonSignif, 
+                           logFC < -logFClimit ~ negLogFC, 
+                           logFC > logFClimit ~ posLogFC,
+                           TRUE ~ "black")) %>%
+  mutate(LABEL = adj.P.Val < 0.05) %>%
+  # group by contrast
+  group_by(CONTRAST, LABEL) %>%
+  
+  # sort by logFC
+  arrange(desc(logFC), .by_group = TRUE) %>%
+  
+  # define the probes to be labeled
+  mutate(ROWNUMBER = row_number())%>%
+  mutate(LABEL = LABEL & (ROWNUMBER <= nLabels | ROWNUMBER > max(ROWNUMBER) - nLabels)) %>%
+  ungroup() %>%
+  tidyr::nest(GROUP = -"CONTRAST") %>%
+  deframe
+
+names <- names(volcano_data) %>%
+  str_replace("TEC.CD31", "*ENG*^- TEC") %>%
+  str_replace("TEC.CD105", "*ENG*^+ TEC") %>%
+  str_replace("NEC.CD31", "*ENG*^-  NEC") %>%
+  str_replace("NEC.CD105", "*ENG*^+ NEC") %>%
+  str_replace("vs", " versus ")
+  
+
+
+  
+volcano_plots <- volcano_data %>%
+  purrr::map2(names,
+             function(x,y){
+               title <- y
+               ggplot(x, 
+                      aes(x=logFC, 
+                          y =-log10(adj.P.Val))) +
+                 geom_point(colour = x$COLOR,
+                            alpha=0.4,
+                            size = 0.1) +
+                 scale_x_continuous(limits = c(-unique(x$CEILING),
+                                               +unique(x$CEILING)),
+                                    breaks = seq(-unique(x$CEILING), 
+                                                 +unique(x$CEILING), 
+                                                 by = 1)) +
+                 geom_hline(yintercept = -log10(0.05)) +
+                 geom_vline(xintercept = -logFClimit) +
+                 geom_vline(xintercept = logFClimit) +
+                 ylim(c(0,25)) +
+                 geom_label_repel(
+                   data = filter(x, LABEL == TRUE),
+                   aes(label = SYMBOL),
+                   colour = filter(x, LABEL == TRUE) %>%
+                     dplyr::select(COLOR) %>%
+                     deframe(),
+                   force = 5,
+                   force_pull = 1,
+                   box.padding   = 0.1,
+                   point.padding = 0.1,
+                   label.padding = 0.1,
+                   size = label_size_genes) +
+                 xlab("log<sub>2</sub>(fold change)") + 
+                 ylab("-log<sub>10</sub>(adjusted p-value)") +
+                 labs(title = title) +
+                 md_theme_bw(base_size = base_size) +
+                 as_md_theme(theme(plot.title = element_text(hjust = 0.5)))
+             })
+
+volcano_plots %>%
+  export(file.path(plotsdir, paste(accession, "limma_volcanoplots", "RDS", sep=".")))
+
+# save the plots
+
+```
+
+# Make LIMMA Venndiagrams
+
+```{r make_venndiagrams_LIMMA}
+library(tidyverse)
+library(limma)
+library(ggvenn)
+library(GOplot)
+
+# load the resultstable
+results.limma <- readRDS(file = file.path(resultsdir, paste(accession, "limmaresults.RDS", sep = ".")))
+fit2 <-  readRDS(file.path(resultsdir,
+                           paste(accession, 
+                           "limmafit.RDS",
+                           sep = ".")))
+# create Venn Diagrams of differentially expressed genes
+# extract DEGs
+
+# input is a 
+# the object has to contain following columns: SYMBOL, logFC, adj.P.Value, additional columns are possible
+threshold = 0.05
+lfc = 1
+
+matrix.venn <- data.frame(decideTests(fit2,
+                                      p.value = threshold,
+                                      lfc = lfc))
+# exclude <- c("TEC.CD105vsNEC.CD105")
+# matrix.venn <- matrix.venn[,setdiff(colnames(matrix.venn), exclude)]
+
+# generate the count matrices for venn diagrams
+
+venn <- list()
+conditions <- c("both", "up", "down")
+
+for (condition in conditions){
+  venn[[condition]] <- vennCounts(matrix.venn,
+                                  include = condition)
+}
+
+matrix.venn <- matrix.venn  %>%
+  dplyr::select(TEC.CD31vsNEC.CD31,
+                TEC.CD105vsNEC.CD105)
+# generate the venn diagram list
+colnames(matrix.venn) <- gsub("vsNEC.CD31", "", colnames(matrix.venn))
+list.venn <- list()
+for (i in colnames(matrix.venn)){
+  list.venn[[i]] <- data.frame(ID = rownames(matrix.venn),
+                               logFC = matrix.venn[,i],
+                               stringsAsFactors = FALSE)
+  list.venn[[i]] <- list.venn[[i]][list.venn[[i]]$logFC != 0,]
+}
+
+# rewrite to something esles
+
+VennDiagrams <- GOVenn(list.venn[[1]],
+                       list.venn[[2]],
+                       label = c("NECs",
+                                 "TECs"),
+                       circle.col = c("blue", "red"),
+                       plot = FALSE)
+VennDiagrams$plot <- VennDiagrams$plot +
+  theme(legend.position="bottom")
+# ggvenninput <- tibble(data.frame(ID = as.numeric(factor(rownames(matrix.venn))),
+#                          matrix.venn != 0))
+
+# VennDiagrams <- ggvenn(ggvenninput)
+
+saveRDS(VennDiagrams, file.path(plotsdir, paste("LIMMA_venndiagrams", accession, "RDS", sep=".")))
+
+```
+
+# Make DAVID Dotplots
+
+```{r make_dotplots_DAVID}
+library(ggplot2)
+library(enrichplot)
+
+# select the conditions
+# load the data
+biologic_context_GO_BP <- import(here::here(resultsdir, "DAVID_RESULTS_BP_LIMMA_enrichResult.RDS"))
+
+# insert line breaks into the resuls
+
+emapplots <- biologic_context_GO_BP %>%
+  purrr::map(emapplot_cluster)
+
+emapplots %>%
+  export(here::here(plotsdir, "DAVID_emapplots_DEG.RDS"))
+
+```
+
+# Make enrichResult networkplots DEGs
+
+```{r make_enrichresult_networkplots}
+library(clusterProfiler)
+library(clusterProfiler.dplyr)
+library(enrichplot)
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(ggforce)
+library(scales)
+# select the conditions
+# load the data
+biologic_context_GO_BP <- import(here::here(resultsdir, "DAVID_RESULTS_BP_LIMMA_enrichResult.RDS"))
+
+nCategories <- 30
+nCluster <- ceiling(sqrt(nCategories))
+show_legend = FALSE
+min_edge = 0.1
+scale = 1
+
+networks <- biologic_context_GO_BP %>%
+  purrr::map(function(x){
+    
+    # take the first n nods
+    node_attributes <- x@result %>%
+      slice_min(p.adjust, 
+                n = nCategories)
+    
+    # filter and recalculate term similarity
+    x <- x %>%
+      dplyr::filter(ID %in% node_attributes$ID) %>%
+      pairwise_termsim()
+    
+    # contruct the network
+    network <- x@termsim %>%
+      as_tbl_graph(directed = FALSE) %>%
+      activate("nodes") %>%
+      mutate(Description = name) %>%
+      inner_join(node_attributes) %>%
+      activate("edges") %>%
+      filter(weight>min_edge)
+  })
+
+network_plots <- networks %>%
+  purrr::map(function(x){
+    set.seed(123)
+    lw <- x %>% igraph::layout_with_fr(weights = E(x)$weight,
+                                       minx = NULL,
+                                       maxx = NULL,
+                                       miny = NULL,
+                                       maxy = NULL)
+    lw <- lw * scale
+    x <- x %>%
+      activate("nodes") %>%
+      mutate(cluster = as.factor(kmeans(lw, centers = nCluster)$cluster))
+    labels <- x %>%
+      data.frame(stringsAsFactors = FALSE) %>%
+      cbind(lw) %>%
+      rename(x = "1",
+             y = "2") %>%
+      group_by(cluster) %>%
+      mutate(label.x = mean(x),
+             label.y = mean(y)) %>%
+      slice_min(p.adjust, n=1, with_ties = FALSE) %>%
+      select(Description, label.x, label.y) %>%
+      rename(label = Description)
+    
+    plot <- x %>% ggraph(layout = lw) +
+      geom_edge_link(alpha = .8,
+                     aes(width = I(weight*1)),
+                     colour='darkgrey') +
+      ggforce::geom_mark_ellipse(aes(x = x, 
+                                     y = y,
+                                     color = cluster,
+                                     fill = cluster),
+                                 label.fontsize = 10,
+                                 show.legend = FALSE) +
+      ggnewscale::new_scale_colour() +
+      geom_node_point(aes(size = Count, 
+                          colour = signif(p.adjust, 0))) +
+      scale_size_continuous(name = "gene number",
+                            range = c(3, 8)) +
+      scale_colour_continuous(low = "red", 
+                              high = "blue", 
+                              name = "adjusted p-value",
+                              guide = guide_colorbar(reverse = TRUE)) +  
+      ggrepel::geom_text_repel(data = labels,
+                               aes(x = label.x, 
+                                   y = label.y, 
+                                   label = label), 
+                               colour = "black",
+                               size = 4, 
+                               bg.color = "white", 
+                               bg.r = 0.1,
+                               show.legend = FALSE) +
+      theme_graph() +
+      theme(legend.position = "bottom") +
+      guides(colour = guide_colourbar(title.position="top", 
+                                      title.hjust = 0.5,
+                                      barwidth = 8,
+                                      barheight = 1),
+             size = guide_legend(title.position="top", 
+                                 title.hjust = 0.5))
+      
+  })
+
+
+network_plots %>%
+  export(here::here(plotsdir, "DAVID_network_plots_BP_DEGs.RDS"))
+
+network_plots %>%
+   purrr::map2(.,
+               names(.),
+               function(x,y){
+                 name <- here::here(plotsdir, paste(y, "emapplot.pdf", sep = "_"))
+                 ggsave(name,
+                        x,
+                        device = cairo_pdf,
+                        width = width,
+                        height = width,
+                        dpi = 600)
+               })
+```
+
+# Make similarity Plots DEGs - Clusterprofiler
+
+```{r make_similarity_plots}
+library(rrvgo)
+
+reduced_terms_up <- import(here::here(resultsdir, "reduced_terms_CLUSTERPROFILER_up.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+reduced_terms_down <- import(here::here(resultsdir, "reduced_terms_CLUSTERPROFILER_down.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+sim_matrices_up <- import(here::here(resultsdir, "sim_matrices_CLUSTERPROFILER_up.RDS"))
+sim_matrices_down <- import(here::here(resultsdir, "sim_matrices_CLUSTERPROFILER_down.RDS"))
+
+scatter_plots_up <- sim_matrices_up %>%
+  purrr::map2(reduced_terms_up,
+              scatterPlot) %T>%
+  export(here::here(plotsdir, "scatter_plots_CLUSTERPROFILER_up.RDS"))
+
+scatter_plots_down <- sim_matrices_down %>%
+  purrr::map2(reduced_terms_down,
+              scatterPlot) %T>%
+  export(here::here(plotsdir, "scatter_plots_CLUSTERPROFILER_down.RDS"))
+
+```
+
+# Make similarity plots DEGs - GSVA
+
+```{r make_similarity_plots}
+library(rrvgo)
+option(ggrepel.max.overlaps = 1000)
+
+reduced_terms_up <- import(here::here(resultsdir, "reduced_terms_GSVA_up.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+reduced_terms_down <- import(here::here(resultsdir, "reduced_terms_GSVA_down.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+sim_matrices_up <- import(here::here(resultsdir, "sim_matrices_GSVA_up.RDS"))
+sim_matrices_down <- import(here::here(resultsdir, "sim_matrices_GSVA_down.RDS"))
+
+scatter_plots_up <- sim_matrices_up %>%
+  purrr::map2(reduced_terms_up,
+              scatterPlot) %T>%
+  export(here::here(plotsdir, "scatter_plots_GSVA_up.RDS"))
+
+scatter_plots_down <- sim_matrices_down %>%
+  purrr::map2(reduced_terms_down,
+              scatterPlot) %T>%
+  export(here::here(plotsdir, "scatter_plots_GSVA_down.RDS"))
+
+```
+
+# Make similarity plots DEGs - GSVA - umap
+
+```{r  make_similarity_plots_umap}
+library(umap)
+library(fpc)
+library(ggrepel)
+
+# upregulated
+
+label_size <- convertUnit(unit(2.5, "pt"), "mm", 
+                          valueOnly=TRUE) # calculate the label size from point to mm
+
+reduced_terms_up <- import(here::here(resultsdir, "reduced_terms_GSVA_up.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+
+plot_data <- reduced_terms_up %>%
+  purrr::map(function(x){
+    x %>%
+      group_by(cluster) %>%                 
+      arrange(desc(score)) %>%
+      mutate(label = ifelse(row_number() == 1, TRUE, FALSE)) %>%
+      ungroup() %>%
+      mutate(cluster = factor(cluster)) %>%
+      data.frame(stringsAsFactors = FALSE)
+  })
+
+scatter_plots_up <- plot_data %>%
+  purrr::map(function(x){
+    ggplot(x, aes(x = x, 
+                  y = y,
+                  colour = cluster,
+                  size = score)) +
+      geom_point() +
+      scale_colour_discrete(guide = FALSE) +
+      labs(x = "umap1",
+           y = "umap2",
+           size = expression("-log"[10]*"(adjusted p-value)")) +
+      geom_label_repel(
+                data = filter(x, label == TRUE),
+                aes(label = term),
+                fill = alpha(c("white"), 0.5),
+                force = 10,
+                force_pull = 0,
+                size = label_size,
+                max.overlaps = 15,
+                box.padding = 0.1,
+                point.padding = 0.1,
+                label.padding = 0.1,
+                max.time = 10,
+                max.iter = 100000) +
+      scale_size(range = c(0.1,1),
+                 limits = c(2,15)) +
+      theme_minimal(base_size = base_size) +
+      theme(legend.position = "bottom",
+            legend.title = element_text(size = rel(1)),
+            legend.text=element_text(size=rel(1)),
+            axis.title.x = element_text(size = base_size*0.5),
+            axis.title.y = element_text(size = base_size*0.5),
+            axis.text.x = element_blank(),
+            axis.text.y = element_blank()) +
+      guides(size = guide_legend(title.position="top", 
+                             title.hjust = 0.5))
+  })
+
+scatter_plots_up %>%
+  export(here::here(plotsdir, "scatter_plots_GSVA_up.RDS"))
+
+# downregulated
+
+reduced_terms_down <- import(here::here(resultsdir, "reduced_terms_GSVA_down.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+
+plot_data <- reduced_terms_down %>%
+  purrr::map(function(x){
+    x %>%
+      group_by(cluster) %>%                 
+      arrange(desc(score)) %>%
+      mutate(label = ifelse(row_number() == 1, TRUE, FALSE)) %>%
+      ungroup() %>%
+      mutate(cluster = factor(cluster)) %>%
+      data.frame(stringsAsFactors = FALSE)
+  })
+
+scatter_plots_down <- plot_data %>%
+  purrr::map(function(x){
+    ggplot(x, aes(x = x, 
+                  y = y,
+                  colour = cluster,
+                  size = score)) +
+      geom_point() +
+      scale_colour_discrete(guide = FALSE) +
+      labs(x = "umap1",
+           y = "umap2",
+           size = expression("-log"[10]*"(adjusted p-value)")) +
+      geom_label_repel(
+                data = filter(x, label == TRUE),
+                aes(label = term),
+                fill = alpha(c("white"), 0.5),
+                force = 10,
+                force_pull = 0,
+                size = label_size,
+                max.overlaps = 15,
+                box.padding = 0.1,
+                point.padding = 0.1,
+                label.padding = 0.1,
+                max.time = 10,
+                max.iter = 100000) +
+      scale_size(range = c(0.1,1),
+                 limits = c(2,15)) +
+      theme_minimal(base_size = base_size) +
+      theme(legend.position = "bottom",
+            legend.title = element_text(size = rel(1)),
+            legend.text=element_text(size=rel(1)),
+            axis.title.x = element_text(size = base_size*0.5),
+            axis.title.y = element_text(size = base_size*0.5),
+            axis.text.x = element_blank(),
+            axis.text.y = element_blank()) +
+      guides(size = guide_legend(title.position="top", 
+                             title.hjust = 0.5))
+  })
+
+scatter_plots_down %>%
+  export(here::here(plotsdir, "scatter_plots_GSVA_down.RDS"))
+
+```
+
+# Make similarity plots DEGs - GSVA - WIKIPATHWAYS umap
+
+```{r  make_similarity_plots_umap}
+library(umap)
+library(fpc)
+library(ggrepel)
+
+# upregulated
+
+label_size <- convertUnit(unit(3, "pt"), "mm", 
+                          valueOnly=TRUE) # calculate the label size from point to mm
+
+reduced_terms_up <- import(here::here(resultsdir, "reduced_terms_PATHWAYS_GSVA_up.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(gs_name = str_replace(gs_name, "WP_", "")) %>%
+      mutate(gs_name = str_replace_all(gs_name, "_", " ")) %>%
+      mutate(term = str_wrap(gs_name, 20)) %>%
+      mutate(score_2 = -log10(adj.P.Val))
+  })
+
+plot_data <- reduced_terms_up %>%
+  purrr::map(function(x){
+    x %>%
+      group_by(cluster) %>%                 
+      arrange(desc(score_2)) %>%
+      mutate(label = ifelse(row_number() == 1, TRUE, FALSE)) %>%
+      ungroup() %>%
+      mutate(cluster = factor(cluster)) %>%
+      data.frame(stringsAsFactors = FALSE)
+  })
+
+scatter_plots_up <- plot_data %>%
+  purrr::map(function(x){
+    ggplot(x, aes(x = x, 
+                  y = y,
+                  colour = cluster,
+                  size = score_2)) +
+      geom_point() +
+      scale_colour_discrete(guide = FALSE) +
+      labs(x = "umap1",
+           y = "umap2",
+           size = expression("-log"[10]*"(adjusted p-value)")) +
+      geom_label_repel(
+                data = filter(x, label == TRUE),
+                aes(label = term),
+                fill = alpha(c("white"), 0.5),
+                force = 3,
+                force_pull = 0.25,
+                size = label_size,
+                max.overlaps = 100,
+                box.padding = 0.1,
+                point.padding = 0.1,
+                label.padding = 0.1) +
+      # scale_size(range = c(0.1,1),
+      #           limits = c(1.3,15)) +
+      theme_minimal(base_size = base_size) +
+      theme(legend.position = "bottom",
+            legend.title = element_text(size = rel(1)),
+            legend.text=element_text(size=rel(1)),
+            axis.title.x = element_text(size = base_size*0.5),
+            axis.title.y = element_text(size = base_size*0.5),
+            axis.text.x = element_blank(),
+            axis.text.y = element_blank()) +
+      guides(size = guide_legend(title.position="top", 
+                             title.hjust = 0.5))
+  })
+
+scatter_plots_up %>%
+  export(here::here(plotsdir, "scatter_plots_GSVA_up.RDS"))
+
+# downregulated
+
+reduced_terms_down <- import(here::here(resultsdir, "reduced_terms_PATHWAYS_GSVA_down.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(gs_name = str_replace(gs_name, "WP_", "")) %>%
+      mutate(gs_name = str_replace_all(gs_name, "_", " ")) %>%
+      mutate(term = str_wrap(gs_name, 20)) %>%
+      mutate(score_2 = adj.P.Val)
+  })
+
+plot_data <- reduced_terms_down %>%
+  purrr::map(function(x){
+    x %>%
+      group_by(cluster) %>%                 
+      arrange(desc(score_2)) %>%
+      mutate(label = ifelse(row_number() == 1, TRUE, FALSE)) %>%
+      ungroup() %>%
+      mutate(cluster = factor(cluster)) %>%
+      data.frame(stringsAsFactors = FALSE)
+  })
+
+scatter_plots_down <- plot_data %>%
+  purrr::map(function(x){
+    ggplot(x, aes(x = x, 
+                  y = y,
+                  colour = cluster,
+                  size = score_2)) +
+      geom_point() +
+      scale_colour_discrete(guide = FALSE) +
+      labs(x = "umap1",
+           y = "umap2",
+           size = expression("-log"[10]*"(adjusted p-value)")) +
+      geom_label_repel(
+                data = filter(x, label == TRUE),
+                aes(label = term),
+                fill = alpha(c("white"), 0.5),
+                force = 3,
+                force_pull = 0.25,
+                size = label_size,
+                max.overlaps = 20,
+                box.padding = 0.1,
+                point.padding = 0.1,
+                label.padding = 0.1) +
+      scale_size(range = c(0.1,1),
+                 limits = c(2,15)) +
+      theme_minimal(base_size = base_size) +
+      theme(legend.position = "bottom",
+            legend.title = element_text(size = rel(1)),
+            legend.text=element_text(size=rel(1)),
+            axis.title.x = element_text(size = base_size*0.5),
+            axis.title.y = element_text(size = base_size*0.5),
+            axis.text.x = element_blank(),
+            axis.text.y = element_blank()) +
+      guides(size = guide_legend(title.position="top", 
+                             title.hjust = 0.5))
+  })
+
+scatter_plots_down %>%
+  export(here::here(plotsdir, "scatter_plots_GSVA_down.RDS"))
+
+```
+
+# Make GSVA volcano plots
+
+```{r make_volcanoplots_GSVA}
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(mdthemes)
+
+label_size <- convertUnit(unit(3, "pt"), "mm", 
+                          valueOnly=TRUE)
+
+# load the resultstable
+results <- rio::import(file.path(resultsdir,
+                                 paste(accession, 
+                                       "limmaresult_PATHWAYS_GSVA.RDS",
+                                       sep = "."))) %>%
+  bind_rows(.id = "CONTRAST")
+# input is a a list named results.limma containing the results of topTable(fit2, coef=contrast, number = nrow(fit2))
+# the object has to contain following columns: SYMBOL, logFC, adj.P.Value, additional columns are possible
+
+# number of genes to be labeled
+nLabels <- 10
+
+# cutoff for the FDR
+pValue <- 0.05
+logFClimit <- 0
+posLogFC <- "darkred"
+negLogFC <- "darkblue"
+nonSignif <- "grey"
+
+
+volcano_data <- results %>%
+  
+  # remove the overall contrast
+  filter(CONTRAST != "overall") %>%
+  
+  # select the ceiling
+  
+  mutate(CEILING = ceiling(max(abs(logFC)))) %>%
+  
+  # select the relevant columns
+  dplyr::select(CONTRAST, wpid, name, logFC, adj.P.Val, CEILING) %>%
+  
+  # convert contrast into a factor, while keeping the sequence
+  mutate(CONTRAST = factor(CONTRAST, levels = unique(CONTRAST))) %>%
+  
+  # define the coloring
+  mutate(COLOR = ifelse(adj.P.Val > pValue, 
+                        nonSignif, 
+                        ifelse(logFC < -logFClimit, 
+                               negLogFC, 
+                               ifelse(logFC > logFClimit, 
+                                      posLogFC, 
+                                      "black")))) %>%
+  # group by contrast
+  group_by(CONTRAST) %>%
+  
+  # sort by logFC
+  arrange(desc(logFC), .by_group = TRUE) %>%
+  
+  # define the probes to be labeled
+  mutate(LABEL = adj.P.Val < 0.05) %>%
+  mutate(ROWNUMBER = row_number()) %>%
+  mutate(LABEL = LABEL & (ROWNUMBER <= nLabels | ROWNUMBER > max(ROWNUMBER) - nLabels)) %>%
+  ungroup() %>%
+  mutate(SYMBOL = str_wrap(name, 20)) %>%
+  tidyr::nest(GROUP = -"CONTRAST") %>%
+  deframe
+
+volcano_plots <- volcano_data %>%
+  purrr::map(function(x){
+    ggplot(x, 
+           aes(x=logFC, 
+               y =-log10(adj.P.Val))) +
+      geom_point(colour = x$COLOR,
+                 alpha=0.4, 
+                 size=0.1) +
+      scale_x_continuous(limits = c(-unique(x$CEILING),
+                                    +unique(x$CEILING)),
+                         breaks = seq(-unique(x$CEILING), 
+                                      +unique(x$CEILING), 
+                                      by = 1)) +
+      geom_hline(yintercept = -log10(0.05)) +
+      geom_vline(xintercept = 0) +
+      geom_vline(xintercept = 0) +
+      # ggtitle(contrast) +
+      ylim(c(0,15)) +
+      geom_label_repel(
+        data = filter(x, LABEL == TRUE),
+        aes(label = SYMBOL),
+        colour = filter(x, LABEL == TRUE) %>%
+          dplyr::select(COLOR) %>%
+          deframe(),
+        size = label_size,
+        fill = alpha(c("white"), 0.5),
+        max.overlaps = 20,
+        box.padding = 0.1,
+        point.padding = 0.1,
+        label.padding = 0.1) +
+      xlab("GSVA enrichment score difference") + 
+      ylab("-log<sub>10</sub>(adjusted p-value)") +
+      md_theme_bw(base_size = base_size) +
+      theme(legend.position="none")
+    
+  })
+
+volcano_plots %>%
+  export(file.path(plotsdir, paste(accession, "gsva_volcanoplots", "RDS", sep=".")))
+
+```
+
+# Make zKonnectivity Diagrams
+
+```{r make_zKonnectivity diagrams}
+library(ggplot2)
+library(ggrepel)
+library(ggdendro)
+
+networkConcepts <-
+  rio::import(here::here(resultsdir, "networkConcepts.RDS"))
+
+connectivity <- networkConcepts$Connectivity
+
+zK <- (connectivity - mean(connectivity))/sqrt(sd(connectivity))
+
+outliers <- names(zK)[abs(zK) > 2]
+
+data <- data.frame(ID = names(zK),
+                   zK = zK,
+                   color = ifelse(names(zK) %in% outliers,
+                                    "red", 
+                                    "black"))
+
+zK_plot <- data %>%
+  ggplot(aes(x = ID, y = zK)) +
+  geom_point(size = 0.5,
+             color = data$color) +
+  labs(x = "samples",
+       y = "zKonnectivity") +
+  geom_label_repel(data = filter(data, color == "red"),
+                   aes(label = ID),
+                   color = "red",
+                   size = label_size_genes*0.75,
+                   force = 100,
+                   force_pull = 0,
+                   alpha = 0.6) +
+  geom_hline(yintercept = 0, colour = "black") +
+  geom_hline(yintercept = -1.96, colour = "red") +
+  theme_bw(base_size = base_size) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid = element_blank())
+
+
+zK_plot %>%
+  rio::export(here::here(plotsdir, "zK_plot.RDS"))
+
+ISA <- rio::import(here::here(resultsdir, "ISA.RDS"))
+
+distISA <- as.dist(1-ISA)
+dendro <- hclust(distISA, method = "average")
+dendr <- dendro_data(dendro, type="rectangle") 
+
+dendr$labels <- dendr$labels %>%
+  left_join(data,
+            by=c("label" = "ID"))
+
+# dendr$segments$yend[dendr$segments$yend < 0.4] <- 0.4
+
+ISA_dendro <- ggplot() + 
+  geom_segment(data=segment(dendr), 
+               aes(x=x, 
+                   y=y, 
+                   xend=xend, 
+                   yend=yend)) +
+  geom_text(data=label(dendr), 
+            aes(x=x, 
+                y=y, 
+                label=label),
+            hjust = 1,
+            nudge_y = -0.01,
+            angle = 90,
+            size=1,
+            color = label(dendr)$color) +
+  labs(x = "samples",
+       y = "1-ISA") +
+  #ylim(0.5,0.7) +
+  scale_y_continuous(expand=c(0.3, 0)) + 
+  theme_classic(base_size = base_size) +
+  theme(axis.line.x=element_blank(),
+        axis.ticks.x=element_blank(),        
+        axis.text.x=element_blank(),
+        axis.title.x=element_blank(),
+        axis.line.y=element_blank(),
+        panel.background=element_rect(fill="white"),
+        panel.grid=element_blank())
+
+ISA_dendro %>%
+  rio::export(here::here(plotsdir, "ISA_dendro.RDS"))
+  
+```
+
+# Make the WGCNA dendrogram
+      
+```{r make_dendrogram}
+library(tidyverse)
+library(magrittr)
+library(WGCNA)
+library(Biobase)
+library(cowplot)
+
+# get the network and the data
+
+net <- readRDS(file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+height <- 5.2/3*2
+
+png(filename = file.path(plotsdir, "dendro.png"),
+    width = height * 2,
+    height = height,
+    units = "in",
+    res = 300
+    # pointsize = font_size
+)
+par(mar = c(0,0,0,0))
+WGCNA::plotDendroAndColors(net$dendrograms[[1]],
+                           colors = data.frame(colors=labels2colors(net$refinedColors)),
+                           dendroLabels = FALSE,
+                           main = "",
+                           groupLabels = c("modules"),
+                           cex.colorLabels = 0.75,
+                           cex.axis = 0.5,
+                           cex.lab = 0.8,
+                           marAll = c(0,4,0,0),
+                           lwd = 0.5)
+dev.off()
+plot <- ggdraw() +
+  draw_image(file.path(plotsdir, "dendro.png")) %T>%
+saveRDS(file.path(plotsdir, paste("DendrogramPlot", accession, "RDS", sep=".")))
+```
+
+# Make the heatmapplot
+      
+```{r make_heatmap}
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(scales)
+library(mdthemes)
+# font_size <- 4
+# get the network and the data
+
+heatmap.data <- readRDS(file.path(resultsdir, 
+                                  paste(accession, 
+                                        "association", 
+                                        "RDS", 
+                                        sep = ".")))
+
+matrix <- heatmap.data %>%
+  pivot_wider(id_cols = X,
+              names_from = Y,
+              values_from = value) %>%
+  data.frame() %>%
+  column_to_rownames("X") %>%
+  t()
+
+cluster <- matrix %>% 
+  dist() %>%
+  hclust(method = "average")
+
+order <- rownames(matrix)[cluster$order]
+
+heatmap.data <- heatmap.data %>%
+  mutate(X = ifelse(X == "CELLTYPE", "Origin","Activation")) %>%
+  mutate(X = factor(X, levels = c("Origin", "Activation"))) %>%
+  mutate(Y = factor(Y, levels = order)) %>%
+  mutate(label = str_replace(label, "e", " %*% 10^"))
+
+# cluster the data
+  
+# generate the heatmap data - join module trait correlation and module trait pvalue, select proper columns and rename them accordingly.
+heatmap <- ggplot(heatmap.data,
+                  aes(x=X, 
+                      y=Y, 
+                      fill=value)) + 
+  geom_tile() +
+  geom_text(aes(label=label),
+            size = 1,
+            parse = TRUE) +
+  scale_fill_gradient2(labels = unicode_minus,
+                       low = muted("blue"),
+                       mid = "white",
+                       high= muted("red"),
+                       limits = c(-20,20),
+                       guide = guide_colorbar(label = TRUE,
+                                              draw.ulim = TRUE, 
+                                              draw.llim = TRUE,
+                                              ticks = FALSE, 
+                                              nbin = 10,
+                                              label.position = "right",
+                                              barwidth = 0.125,
+                                              barheight = 3, 
+                                              direction = "vertical")) +
+  ylab("module") +
+  xlab("") +
+  labs(fill = "t-statistics") +
+  md_theme_bw(base_size = base_size) +
+  as_md_theme(theme(axis.ticks = element_blank(),
+        axis.title.y = element_text(size = base_size*0.7),
+        axis.text.x = element_text(angle = 90, 
+                                   hjust = 1,
+                                   size = base_size*0.5),
+        axis.text.y = element_text(size = base_size*0.5),
+        legend.title = element_text( size=4), 
+        legend.text=element_text(size=4),
+        legend.position="right"))
+  # save the plot
+heatmap %>%
+  rio::export(here::here(plotsdir, paste("HeatmapPlot", accession, "RDS", sep=".")))
+```
+
+# Make the eigengenes - violinplots
+      
+```{r make_eigengeneplots}
+library(tidyverse)
+library(magrittr)
+library(ggpubr)
+library(WGCNA)
+library(limma)
+library(mdthemes)
+## get the network and the data
+net <- readRDS(file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+# define the groups. The ordering of the groups in the plot happens here !!!
+groups <- factor(paste(net$eset$CELLTYPE, net$eset$MARKER, sep = "."),
+                 levels = c("NEC.CD31", "NEC.CD105", "TEC.CD31", "TEC.CD105"))
+
+# define comparisons
+comparisons <- list(c("NEC.CD105", "NEC.CD31"),
+                    c("TEC.CD31", "NEC.CD31"),
+                    c("TEC.CD105", "NEC.CD31"), 
+                    c("TEC.CD31", "NEC.CD105"),
+                    c("TEC.CD105", "NEC.CD105"),
+                    c("TEC.CD105", "TEC.CD31"))
+
+# extract the module colors
+moduleColors = paste("M", net$refinedColors, sep = "")
+
+# Calculate MEs with color labels
+data <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  
+  # remove grey
+  dplyr::select(-MEM0) %>%
+  
+  # rename the color names from ME<color> to <color>
+  rename_all(~ str_replace(.,"ME", "")) %>%
+  
+  # add the sampleID
+  rownames_to_column(var = "SAMPLE") %>%
+  
+  # add the groups
+  mutate(GROUP = groups) %>%
+  
+  # pivot to long representation
+  pivot_longer(!(matches("SAMPLE") | matches("GROUP")),
+               names_to = "MODULE",
+               values_to = "VALUE") %>%
+  
+  # add the color
+  mutate(COLOR = WGCNA::labels2colors(as.numeric(str_replace(MODULE, "M", ""))))
+
+eigengene.plots.violin <- data %>%
+  tidyr::nest(GROUP = -"MODULE") %>%
+  deframe() %>%
+  purrr::map2(names(.),
+              function(x,y){
+                # calculate the p-values
+                comparison <- compare_means(VALUE ~ GROUP, 
+                                            x, 
+                                            method = "t.test", 
+                                            p.adjust.method = "hochberg") %>%
+                  mutate(y.position = c(0.375, 0.5, 0.625, 0.75, 0.875, 1)) %>%
+                  # mutate(x.min = c()) %>%
+                  mutate(p.sci = paste(scientific_10(p.adj))) %>%
+                  # mmutate(p.sci = paste("expression(", p.sci, ")", sep = "")) %>%
+                  dplyr::filter(p.adj < 0.05)
+                # call the plotting function
+                ggplot(x, aes(x = GROUP,
+                              y = VALUE))+ 
+                  geom_violin(stat="ydensity",
+                              fill = unique(x$COLOR),
+                              size = 0.25) +
+                  geom_boxplot(width=0.1,
+                               size = 0.25,
+                               outlier.size=0.1) +
+                  ylim(-1, 1) +
+                  annotate(geom = "text",
+                           x = 1,
+                           y = 1,
+                           label = paste("Module:", y),
+                           size = 2,
+                           hjust = 0) +
+                  #geom_text(x = 1, 
+                  #          y = 1,
+                  #          label = paste("Module:", y)) +
+                  geom_hline(yintercept = 0,
+                             size = 0.25) +
+                  labs(x = "",
+                       y = "eigengene expression") +
+                  scale_x_discrete(labels = c(expression(NEC^'ENG-'),
+                                              expression(NEC^'ENG+'),
+                                              expression(TEC^'ENG-'),
+                                              expression(TEC^'ENG+'))) +
+                  #stat_pvalue_manual(comparison, 
+                  #                   label = "{paste(text = p.sci)}",
+                  #                  size = 2.1234) +
+                  geom_signif(y_position = comparison$y.position,
+                              annotations = comparison$p.sci,
+                              xmin = comparison$group1, 
+                              xmax = comparison$group2,
+                              parse = TRUE,
+                              size = 0.2,
+                              textsize = 1.75) +
+                  theme_bw(base_size = base_size) +
+                  theme(axis.text.x = element_text(angle=90))}
+  )
+
+
+  # save everything
+eigengene.plots.violin %>%
+  export(here::here(plotsdir, paste("EigengenePlotsViolin", accession, "RDS", sep=".")))
+
+
+```
+
+# Make the network plots for each module
+
+```{r make_networkplots}
+library(tidygraph)
+library(ggraph)
+library(ggrepel)
+library(rDGIdb)
+# load network
+network <- import(file.path(resultsdir, 
+                    paste(accession, 
+                          "network.RDS", 
+                          sep = ".")))
+DGIDB <- rio::import(here::here(resultsdir, "DGIDB.result.RDS")) %>%
+  detailedResults() %>%
+  # dplyr::filter(PMIDs != "") %>%
+  dplyr::select(Gene) %>%
+  deframe() %>%
+  unique()
+
+# set hubgene threshold - select the top fraction
+threshold <- 0.05
+
+# alternatively set number threshold
+network <- network %>%
+  activate(nodes) %>%
+  mutate(SYMBOL_COLOR = ifelse(SYMBOL %in% DGIDB, "red", "black"))
+
+networks_thresholded <- network %>%
+  activate(edges) %>%
+  arrange(weight) %>%
+  activate(nodes) %>%
+  dplyr::arrange(desc(kWithin.norm)) %>%
+  group_by(module) %>%
+  mutate(fraction = (row_number()-1)/n()) %>%
+  dplyr::filter(fraction <= threshold) %>%
+  ungroup %>%
+  to_split(module) %>%
+  set_names(str_replace(names(.), "module: ", ""))
+
+plots <- networks_thresholded %>%
+  purrr::map2(names(.),
+              function(x,y){
+                color <- WGCNA::labels2colors(as.numeric(str_replace(y, "M", "")))
+                label_colours <- x %>%
+                  activate("nodes") %>%
+                  data.frame() %>%
+                  dplyr::select(SYMBOL_COLOR) %>%
+                  deframe()
+                layout <- igraph::layout_in_circle(x) %>%
+                                   .[,c(2,1)] %>%
+                  set_names(c("x", "y"))
+                try(x %>% ggraph(layout = layout) +
+                      geom_edge_link(aes(colour = as.factor(COLOR),
+                                         alpha = weight^20,
+                                         width = weight^4),
+                                         # edge_width = 0.1), 
+                                     show.legend = FALSE,
+                                     end_cap = circle(2, "mm"),
+                                     start_cap = circle(2, "mm")) +
+                      scale_edge_color_manual(values = x %>%
+                                                activate("nodes") %>%
+                                                activate("edges") %>%
+                                                data.frame(stringsAsFactors = FALSE) %>%
+                                                dplyr::select(COLOR) %>%
+                                                deframe()) +
+                      scale_edge_width(range = c(0,1)) +
+                      #scale_edge_color_gradient(low  = "white",
+                      #                          high = "black",
+                      #                          limits = c(0,1)) +
+                      # then nodes nodes in foreground
+                      geom_node_point(aes(size = kWithin.norm),
+                                      fill = color,
+                                      colour = "black",
+                                      pch = 21) +
+                      scale_size(range = c(0.1,2.5),
+                                 limits = c(0,1),
+                                 breaks = c(0, 0.25, 0.5, 0.75, 1.0)) +
+                      ggtitle(label = paste("Module:", y)) +
+                      #annotate(geom = "text",
+                      #     x = -1,
+                      #     y = 1,
+                      #     label = paste("Module:", y),
+                      #     size = 3,
+                      #     hjust = 0) +
+                      ggraph::geom_node_label(aes(label = SYMBOL),
+                                      repel=TRUE,
+                                      force = 5,
+                                      colour  = label_colours,
+                                      show.legend = FALSE,
+                                      size = label_size_genes,
+                                      label.padding = 0.1,
+                                      alpha = 0.6,
+                                      vjust = "outward",
+                                      hjust = "outward") +
+                      # color the nodes
+                      # scale_color_gradient2(low = "darkblue",
+                      #                       mid = "white",
+                      #                      high= "darkred",
+                      #                      limits = c(-2,2),
+                      #                      oob = squish) +
+                      # shape the legend
+                      labs(size = "connectivity") +
+                      theme_graph(base_size = base_size,
+                                  base_family="sans") +
+                      theme(legend.position = "bottom",
+                            legend.title = element_text(size = 8),
+                            legend.text=element_text(size=6),
+                            plot.margin=grid::unit(c(2,2,2,2), "mm"),
+                            plot.title = element_text(size = 6,
+                                                      face = "plain")) +
+                      guides(size = guide_legend(title.position="top", 
+                                                 title.hjust = 0.5,
+                                                 fill = "black",
+                                                 override.aes=list(fill = "black"))))})
+
+plots %>%
+  export(file.path(resultsdir, "network_plots.RDS"))
+```
+
+# Make similarity plots modules - rrvgo
+
+```{r make_similarity_plots}
+library(rrvgo)
+
+reduced_terms <- import(here::here(resultsdir, "reduced_terms_CLUSTERPROFILER_modules.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+sim_matrices <- import(here::here(resultsdir, "sim_matrices_CLUSTERPROFILER_modules.RDS"))
+
+scatter_plots <- sim_matrices %>%
+  purrr::map2(reduced_terms,
+              scatterPlot) 
+scatter_plots%>%
+  export(here::here(plotsdir, "scatter_plots_CLUSTERPROFILER_modules.RDS"))
+
+
+```
+
+# Make similarity plots modules - umap
+
+```{r  make_similarity_plots_umap}
+library(umap)
+library(fpc)
+library(ggrepel)
+
+label_size <- convertUnit(unit(3, "pt"), "mm", 
+                          valueOnly=TRUE) # calculate the label size from point to mm
+
+biologic_context_GO_BP <- import(here::here(resultsdir, "CLUSTERPROFILER_RESULTS_BP_MODULES.RDS")) %>%
+  purrr::map(function(x){
+    x %>% data.frame(stringsAsFactors = FALSE) %>%
+      dplyr::filter(p.adjust < 0.05)
+  })
+
+reduced_terms <- import(here::here(resultsdir, "reduced_terms_CLUSTERPROFILER_modules.RDS")) %>%
+  purrr::map(function(x){
+    x %>%
+      mutate(term = str_wrap(term, 20)) %>%
+      mutate(cluster = factor(cluster)) %>%
+      mutate(parentTerm = str_wrap(parentTerm, width = 20))
+  })
+
+
+plot_data <- reduced_terms %>%
+  purrr::map(function(x){
+    result <- x
+                if (length(levels(result$cluster)) > 1) {
+                    result <- result %>%
+                    group_by(cluster) %>%
+                    arrange(desc(score)) %>%
+                    mutate(label = ifelse(row_number() == 1, TRUE, FALSE)) %>%
+                    ungroup()
+                  } else {
+                    result <- result %>%
+                      arrange(desc(score)) %>%
+                      mutate(label = ifelse(row_number() <= 5, TRUE, FALSE))
+                  }
+                  result %>%
+                    data.frame(stringsAsFactors = FALSE)
+              })
+
+# take care of other modules
+plot_data$M15 <- biologic_context_GO_BP$M15 %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(x = 0,
+         y = 0,
+         score = -log10(p.adjust),
+         cluster = factor(1),
+         label = TRUE) %>%
+  dplyr::rename(go = ID,
+                term = Description)
+
+scatter_plots <- plot_data %>%
+  purrr::map(function(x){
+    ggplot(x, aes(x = x, 
+                  y = y,
+                  colour = cluster,
+                  size = score)) +
+      geom_point() +
+      scale_colour_discrete(guide = FALSE) +
+      labs(x = "umap1",
+           y = "umap2",
+           size = expression("-log"[10]*"(adjusted p-value)")) +
+      geom_label_repel(
+                data = filter(x, label == TRUE),
+                aes(label = term),
+                fill = alpha(c("white"), 0.5),
+                size = label_size,
+                force = 5,
+                force_pull = 0.25,
+                max.overlaps = 100,
+                box.padding = 0.1,
+                point.padding = 0.1) +
+      scale_size(range = c(0.1,3),
+                 limits = c(1.3,40),
+                 breaks = c(1.3,10,20,40)) +
+      theme_minimal(base_size = base_size) +
+      theme(legend.position = "bottom",
+            legend.title = element_text(size = 8),
+            legend.text=element_text(size=6),
+            axis.title.x = element_text(size = base_size*0.5),
+            axis.title.y = element_text(size = base_size*0.5),
+            axis.text.x = element_blank(),
+            axis.text.y = element_blank()) +
+      guides(size = guide_legend(title.position="top", 
+                             title.hjust = 0.5))
+  })
+
+
+scatter_plots%>%
+  export(here::here(plotsdir, "scatter_plots_CLUSTERPROFILER_modules.RDS"))
+
+```
+
+
+# Make the enrichResult networkplots DEGs
+
+```{r make_enrichresult_networkplots}
+library(clusterProfiler)
+library(enrichplot)
+library(clusterProfiler.dplyr)
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(ggforce)
+library(scales)
+# select the conditions
+# load the data
+biologic_context_GO_BP <- import(here::here(resultsdir, "DAVID_RESULTS_BP_MODULES_enrichResult.RDS"))
+
+valid <- biologic_context_GO_BP %>%
+  purrr::map(nrow) %>%
+  unlist() %>%
+  extract(. > 0) %>%
+  names(.)
+
+nCategories <- 30
+nCluster <- ceiling(sqrt(nCategories))
+show_legend = FALSE
+min_edge = 0.2
+adj.P.Value <- 0.05
+
+biologic_context_GO_BP <- biologic_context_GO_BP %>%
+  extract(valid)
+
+biologic_context_GO_BP <- biologic_context_GO_BP %>%
+  purrr::map(function(x){
+    x %>%
+      clusterProfiler.dplyr::filter(p.adjust < 0.05)
+  })
+
+
+biologic_context_GO_BP <- biologic_context_GO_BP %>%
+  purrr::map(function(x){
+    x %>%
+      clusterProfiler.dplyr::filter(p.adjust < 0.05)
+  })
+
+biologic_context_GO_BP <- biologic_context_GO_BP %>%
+  extract(lapply(., nrow) > 3)  
+
+networks <- biologic_context_GO_BP %>%
+  purrr::map(function(x){
+    # take the first n nods
+    node_attributes <- x@result %>%
+      slice_min(p.adjust, 
+                n = nCategories,
+                with_ties = FALSE)
+    
+    # filter and recalculate term similarity
+    x <- x %>%
+      dplyr::filter(ID %in% node_attributes$ID) %>%
+      pairwise_termsim()
+    
+    # contruct the network
+    network <- x@termsim %>%
+      as_tbl_graph(directed = FALSE) %>%
+      activate("nodes") %>%
+      mutate(Description = name) %>%
+      inner_join(node_attributes) %>%
+      activate("edges") %>%
+      filter(weight>min_edge)
+  })
+
+network_plots <- networks %>%
+  purrr::map(function(x){
+    set.seed(123)
+    lw <- x %>% igraph::layout_with_fr(weights = E(x)$weight)
+    nCategories <- x %>% 
+      activate("nodes") %>%
+      data.frame() %>%
+      nrow()
+    nCluster <- ceiling(sqrt(nCategories))
+    x <- x %>%
+      activate("nodes") %>%
+      mutate(cluster = as.factor(kmeans(lw, centers = nCluster)$cluster))
+    labels <- x %>%
+      data.frame(stringsAsFactors = FALSE) %>%
+      cbind(lw) %>%
+      rename(x = "1",
+             y = "2") %>%
+      group_by(cluster) %>%
+      mutate(label.x = mean(x),
+             label.y = mean(y)) %>%
+      slice_min(p.adjust, n=1, with_ties = FALSE) %>%
+      dplyr::select(Description, label.x, label.y) %>%
+      rename(label = Description)
+    
+    plot <- x %>% ggraph(layout = lw) +
+      geom_edge_link(alpha = .8,
+                     aes(width = I(weight*1)),
+                     colour='darkgrey') +
+      ggforce::geom_mark_ellipse(aes(x = x, 
+                                     y = y,
+                                     color = cluster,
+                                     fill = cluster),
+                                 label.fontsize = 10,
+                                 show.legend = FALSE) +
+      ggnewscale::new_scale_colour() +
+      geom_node_point(aes(size = Count, 
+                          colour = signif(p.adjust, 0))) +
+      scale_size_continuous(name = "gene number",
+                            range = c(3, 8)) +
+      scale_colour_continuous(low = "red", 
+                              high = "blue", 
+                              name = "adjusted p-value",
+                              guide = guide_colorbar(reverse = TRUE)) +  
+      ggrepel::geom_text_repel(data = labels,
+                               aes(x = label.x, 
+                                   y = label.y, 
+                                   label = label), 
+                               colour = "black",
+                               size = 4, 
+                               bg.color = "white", 
+                               bg.r = 0.1,
+                               show.legend = FALSE) +
+      theme_graph() +
+      theme(legend.position = "bottom") +
+      guides(colour = guide_colourbar(title.position="top", 
+                                      title.hjust = 0.5,
+                                      barwidth = 8,
+                                      barheight = 1),
+             size = guide_legend(title.position="top", 
+                                 title.hjust = 0.5))
+      
+  })
+
+
+network_plots %>%
+  export(here::here(plotsdir, "DAVID_network_plots_BP_MODULES.RDS"))
+
+network_plots %>%
+   purrr::map2(.,
+               names(.),
+               function(x,y){
+                 name <- here::here(plotsdir, paste(y, "emapplot.pdf", sep = "_"))
+                 ggsave(name,
+                        x,
+                        device = cairo_pdf,
+                        width = width,
+                        height = width,
+                        dpi = 600)
+               })
+```
+
+# Make the enrichResult dotplots
+
+```{r make_enrichresult_dotplots}
+library(clusterProfiler)
+library(enrichplot)
+library(clusterProfiler.dplyr)
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(ggforce)
+library(scales)
+
+biologic_context_GO_MF <- import(here::here(resultsdir, "DAVID_RESULTS_MF_MODULES_enrichResult.RDS"))
+
+selected <- lapply(biologic_context_GO_MF, class) == "enrichResult"
+
+biologic_context_GO_MF <- biologic_context_GO_MF %>%
+  extract(selected)
+
+plots <- biologic_context_GO_MF %>%
+  purrr::map(function(x){
+    x@result <- x@result %>%
+      mutate(Description = str_wrap(Description, width = 30))
+    dotplot(x) + theme(axis.text.y = element_text(size = 12))
+  })
+
+plots %>%
+  export(here::here(plotsdir, "DAVID_dotplots_MF_MODULES.RDS"))
+```
+
+# Make drug-gene interaction plots
+
+```{r make_drug_gene_interactions}
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(ggforce)
+library(scales)
+library(ggparty)
+
+# load network
+network <- import(file.path(resultsdir, 
+                    paste(accession, 
+                          "network.RDS", 
+                          sep = ".")))
+
+network_ppi <- import(file.path(resultsdir, 
+                    paste(accession, 
+                          "network_ppi.RDS", 
+                          sep = ".")))
+DGIDB <- rio::import(here::here(resultsdir, "DGIDB.result.RDS"))
+# set hubgene threshold
+threshold <- 0.05
+
+genes <- network %>%
+  activate("nodes") %>%
+  data.frame %>%
+  group_by(module) %>%
+  arrange(desc(kWithin.norm)) %>%
+  filter(row_number()/max(row_number()) <= threshold)
+
+
+drugableGenes <- network %>%
+  activate("nodes") %>%
+  tidygraph::as_tibble() %>%
+  inner_join(DGIDB %>%
+               detailedResults(), 
+            by = c("SYMBOL" = "Gene")) %>%
+  dplyr::select(module, SYMBOL, GENENAME, Drug, Source, PMIDs, kWithin.norm) %>%
+  dplyr::filter(str_detect(Drug, "CHEMBL", negate = "TRUE")) %>%
+  group_by(module, SYMBOL, GENENAME, kWithin.norm) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(module) %>%
+  arrange(GENENAME, .by_group = TRUE) %>%
+  ungroup()
+
+PPIs <- network_ppi %>%
+  activate(edges) %>%
+  distinct %>%
+  activate(nodes) %>%
+  left_join(drugableGenes) %>%
+  dplyr::filter(ENTREZID %in% genes$ENTREZID) %>%
+  inner_join(drugableGenes) %>%
+  mutate(Label = paste(SYMBOL, n, sep = "\n")) %>%
+  arrange(desc(kWithin.norm)) %>%
+  to_split(MODULE) %>%
+  set_names(str_replace(names(.), "MODULE: ", ""))
+  
+ 
+
+plots <- PPIs %>%
+  purrr::map2(names(.),
+              function(x,y){
+                try(x %>% ggraph(layout = igraph::layout_in_circle(x) %>%
+                                   .[,c(2,1)]) +
+                      geom_edge_parallel(aes(colour = type),
+                                         # edge_width = 0.1), 
+                                     show.legend = TRUE,
+                                     sep = unit(1, "mm"),
+                                     end_cap = circle(2, "mm"),
+                                     start_cap = circle(2, "mm")) +
+                      #scale_edge_color_gradient(low  = "white",
+                      #                          high = "black",
+                      #                          limits = c(0,1)) +
+                      # then nodes nodes in foreground
+                      geom_node_point(aes(size = kWithin.norm),
+                                      fill = y,
+                                      colour = "black",
+                                      pch = 21) +
+                      scale_size(range = c(0.1,2.5),
+                                 limits = c(0,1)) +
+                      ggraph::geom_node_label(aes(label = Label),
+                                      repel=TRUE,
+                                      show.legend = FALSE,
+                                      force = 1,
+                                      force_pull = 0,
+                                      max.overlaps = 1,
+                                      size = label_size_genes,
+                                      label.padding = 0.1) +
+                      #geom_node_label(aes(label = Drug),
+                      #                repel=TRUE,
+                      #                show.legend = FALSE,
+                      #                size = label_size_genes,
+                      #                label.padding = 0.1) +
+                      # color the nodes
+                      # scale_color_gradient2(low = "darkblue",
+                      #                       mid = "white",
+                      #                      high= "darkred",
+                      #                      limits = c(-2,2),
+                      #                      oob = squish) +
+                      # shape the legend
+                      labs(size = "connectivity",
+                           colour = "evidence") +
+                      theme_graph(base_size = base_size,
+                                  base_family="sans") +
+                      theme(legend.position = "right",
+                            legend.title = element_text(size = 8),
+                            legend.text=element_text(size=6),
+                            legend.key.size = unit(5, 'mm'),
+                            plot.margin=grid::unit(c(2,2,2,2), "mm")) +
+                      guides(size = guide_legend(title.position="top", 
+                                                 title.hjust = 0.5,
+                                                 fill = "black",
+                                                 override.aes=list(fill = "black"))))})
+
+plots %>%
+  export(file.path(resultsdir, "PPI_network_plots.RDS"))
+```
+
+# Prepare colorized Wikipathways
+
+```{r colorize WIKIPATHWAYS}
+library(rWikiPathways)
+library(RCy3)
+
+limma_results <- import(here::here(resultsdir, "E-GEOD-51401.limmaresult.RDS")) %>%
+  extract(c("TEC.CD31vsNEC.CD31",
+            "TEC.CD105vsNEC.CD105")) %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                x %>% 
+                  dplyr::select("SYMBOL", 
+                                "logFC",
+                                "AveExpr",
+                                "t",
+                                "P.Value",
+                                "adj.P.Val") %>%
+                  set_names(c("SYMBOL", paste(c("logFC",
+                                            "AveExpr",
+                                            "t",
+                                            "P.Value",
+                                            "adj.P.Val"),
+                                          y,
+                                          sep = "_")))
+  }) %>%
+  reduce(left_join, by = "SYMBOL")
+
+pathways <- import(here::here(resultsdir, "E-GEOD-51401.limmaresult_PATHWAYS_GSVA.RDS")) %>%
+  extract(c("TEC.CD31vsNEC.CD31",
+            "TEC.CD105vsNEC.CD105")) %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                x %>% 
+                  dplyr::select("wpid", 
+                                "logFC",
+                                "AveExpr",
+                                "t",
+                                "P.Value",
+                                "adj.P.Val") %>%
+                  set_names(c("wpid", paste(c("logFC",
+                                            "AveExpr",
+                                            "t",
+                                            "P.Value",
+                                            "adj.P.Val"),
+                                          y,
+                                          sep = "_")))
+  }) %>%
+  reduce(left_join, by = "wpid")
+commands <- paste0('wikipathways import-as-pathway id=',pathways$wpid) %>%
+  unique()
+
+commands %>%
+  purrr::map(commandsRun)
+
+networks <- getNetworkList()
+
+networks %>%
+  purrr::map(function(x){
+    print(x)
+    loadTableData(limma_results,
+                  data.key.column = "SYMBOL",
+                  table = "node",
+                  table.key.column = "name",
+                  namespace = "default",
+                  network = x)
+  })
+
+networks <- getNetworkList()
+names(networks) <- str_replace(networks, " - Homo sapiens", "") %>%
+  make.names() %>%
+  str_replace_all("\\.", "_")
+
+networks %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                file_name <- here::here(plotsdir, "PECAM1", paste(y, "png", sep = "."))
+                setVisualStyle(style.name = "logFC_CD31", 
+                               network = x)
+                fitContent(selected.only = FALSE, 
+                           network = x)
+                exportImage(filename = file_name,
+                            type = "PNG",
+                            zoom = 500,
+                            network = x)
+              })
+
+networks %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                file_name <- here::here(plotsdir, "ENG", paste(y, "png", sep = "."))
+                setVisualStyle(style.name = "logFC_CD105", 
+                               network = x)
+                fitContent(selected.only = FALSE, 
+                           network = x)
+                exportImage(filename = file_name,
+                            type = "PNG",
+                            zoom = 500,
+                            network = x)
+              })
+
+```
+
+# Figure Expression of Liver Endothelial Markers
+
+```{r figure02}
+library(Biobase)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+library(mdthemes)
+figure_name <-"figure02"
+
+net <- readRDS(file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+
+eset <- net$eset
+GOIs <- c("ENG", 
+          "FLT1", 
+          "LYVE1", 
+          "PECAM1")
+
+# extract the expression data
+expression <- exprs(eset) %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::filter(fData(eset)$SYMBOL %in% GOIs)
+
+# extract the fdata
+fdata <- fData(eset) %>%
+  dplyr::filter(fData(eset)$SYMBOL %in% GOIs) %>%
+  select(SYMBOL) %>%
+  deframe()
+
+data <- expression %>%
+  t() %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  set_names(fdata) %>%
+  cbind(pData(eset)) %>%
+  dplyr::select(c(all_of(GOIs), "MARKER", "CELLTYPE")) %>%
+  mutate(GROUP = factor(paste(CELLTYPE, MARKER, sep = "."),
+                        levels = c("NEC.CD31", "NEC.CD105", "TEC.CD31", "TEC.CD105"))) %>%
+  mutate(COLOUR = if_else(CELLTYPE == "TEC", "red", "blue"))
+
+comparisons <- list(c("NEC.CD105", "NEC.CD31"),
+                    c("TEC.CD31", "NEC.CD31"),
+                    c("TEC.CD105", "NEC.CD31"), 
+                    c("TEC.CD31", "NEC.CD105"),
+                    c("TEC.CD105", "NEC.CD105"),
+                    c("TEC.CD105", "TEC.CD31"))
+
+# significance levels have to be corrected manually
+
+comparison <- compare_means(ENG ~ GROUP, 
+                            data, 
+                            method = "t.test", 
+                            p.adjust.method = "hochberg") %>%
+  mutate(y.position = c(11.8, 12.4, 13.0, 13.6, 14.2, 14.8)) %>%
+  mutate(p.sci = scientific_10(p.adj)) %>%
+  dplyr::filter(p.adj < 0.05)
+
+plot_ENG <- ggplot(data, aes(x = GROUP,
+                             y = ENG))+ 
+  geom_violin(stat="ydensity",
+              size = 0.25,
+              fill = "beige") +
+  geom_boxplot(width=0.1,
+               size = 0.25,
+               outlier.size = 0.1) +
+  ylim(4,15) +
+  labs(x = "",
+       y = "ENG expression [log<sub>2</sub>]") +
+  scale_x_discrete(labels = c("NEC^*ENG*-",
+                              "NEC^*ENG*+",
+                              "TEC^*ENG*-",
+                              "TEC^*ENG*+")) +
+  geom_signif(y_position = comparison$y.position,
+              annotations = comparison$p.sci,
+              xmin = comparison$group1,
+              xmax = comparison$group2,
+              parse = TRUE,
+              size = 0.2,
+              textsize = 1.75) +
+  md_theme_bw(base_size = base_size) +
+  as_md_theme(theme(axis.text.x = element_text(angle=90)))
+
+comparison <- compare_means(PECAM1 ~ GROUP, 
+                            data, 
+                            method = "t.test", 
+                            p.adjust.method = "hochberg") %>%
+  mutate(y.position = c(11.8, 12.4, 13.0, 13.6, 14.2, 14.8)) %>%
+  mutate(p.sci = scientific_10(p.adj)) %>%
+  dplyr::filter(p.adj < 0.05)
+
+plot_PECAM1 <- ggplot(data, 
+                      aes(x = GROUP,
+                          y =PECAM1))+ 
+  geom_violin(stat="ydensity",
+              size = 0.25,
+              fill = "beige") +
+  geom_boxplot(width=0.1,
+               size = 0.25,
+               outlier.size = 0.1) +
+  ylim(4,15) +
+  labs(x = "",
+       y = "PECAM1 expression [log<sub>2</sub>]") +
+       scale_x_discrete(labels = c("NEC^*ENG*-",
+                                   "NEC^*ENG*+",
+                                   "TEC^*ENG*-",
+                                   "TEC^*ENG*+")) +
+  geom_signif(y_position = comparison$y.position,
+              annotations = comparison$p.sci,
+              xmin = comparison$group1,
+              xmax = comparison$group2,
+              parse = TRUE,
+              size = 0.2,
+              textsize = 1.75) +
+  md_theme_bw(base_size = base_size) +
+  as_md_theme(theme(axis.text.x = element_text(angle=90)))
+
+comparison <- compare_means(LYVE1 ~ GROUP, 
+                            data, 
+                            method = "t.test", 
+                            p.adjust.method = "hochberg") %>%
+  mutate(y.position = c(11.8, 12.4, 13.0, 13.6, 14.2, 14.8)) %>%
+  mutate(p.sci = scientific_10(p.adj)) %>%
+  dplyr::filter(p.adj < 0.05)
+
+plot_LYVE1 <- ggplot(data, aes(x = GROUP,
+                               y = LYVE1))+ 
+  geom_violin(stat="ydensity",
+              size = 0.25,
+              fill = "beige") +
+  geom_boxplot(width=0.1,
+               size = 0.25,
+               outlier.size = 0.1) +
+  ylim(4,15) +
+  labs(x = "",
+       y = "LYVE1 expression [log<sub>2</sub>]") +
+  scale_x_discrete(labels = c("NEC^*ENG*-",
+                              "NEC^*ENG*+",
+                              "TEC^*ENG*-",
+                              "TEC^*ENG*+")) +
+  geom_signif(y_position = comparison$y.position,
+              annotations = comparison$p.sci,
+              xmin = comparison$group1,
+              xmax = comparison$group2,
+              parse = TRUE,
+              size = 0.2,
+              textsize = 1.75) +
+  md_theme_bw(base_size = base_size) +
+  as_md_theme(theme(axis.text.x = element_text(angle=90)))
+
+comparison <- compare_means(FLT1 ~ GROUP, 
+                            data, 
+                            method = "t.test", 
+                            p.adjust.method = "hochberg") %>%
+  mutate(y.position = c(11.8, 12.4, 13.0, 13.6, 14.2, 14.8)) %>%
+  mutate(p.sci = scientific_10(p.adj)) %>%
+  dplyr::filter(p.adj < 0.05)
+
+plot_FLT1 <- ggplot(data, 
+                      aes(x = GROUP,
+                          y = FLT1))+ 
+  geom_violin(stat="ydensity",
+              size = 0.25,
+              fill = "beige") +
+  geom_boxplot(width=0.1,
+               size = 0.25,
+               outlier.size = 0.1) +
+  ylim(4,15) +
+  labs(x = "",
+       y = "FLT1 expression [log<sub>2</sub>]") +
+  scale_x_discrete(labels = c("NEC^*ENG*-",
+                              "NEC^*ENG*+",
+                              "TEC^*ENG*-",
+                              "TEC^*ENG*+")) +
+  geom_signif(y_position = comparison$y.position,
+              annotations = comparison$p.sci,
+              xmin = comparison$group1,
+              xmax = comparison$group2,
+              parse = TRUE,
+              size = 0.2,
+              textsize = 1.75) +
+  md_theme_bw(base_size = base_size) +
+  as_md_theme(theme(axis.text.x = element_text(angle=90)))
+
+figure <- plot_ENG + 
+  plot_FLT1 +
+  plot_LYVE1 +
+  plot_PECAM1 +
+  plot_layout(widths = c(1,1)) +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"))
+
+ggsave(filename = paste(figure_name, "pdf", sep = "."), 
+       plot = figure,
+       path = label,
+       device = pdf,
+       width = page_width,
+       height = page_width,
+       units = "mm",
+       dpi = dpi)
+```
+
+
+
+# Figure of Liver Endothelial Markers - scRNASeq
+
+```{r figure03}
+library(Biobase)
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+library(ggpubr)
+library(mdthemes)
+
+figure_name <-"figure03"
+
+label_size = 10
+
+# create a legend
+
+data <- data.frame(x = seq(-3,3, by = 1)) %>%
+  mutate(y = x)
+
+legend <- data %>%
+  ggplot(aes(x = x, 
+             y = y, 
+             fill = y)) +
+  geom_point() +
+  scale_fill_gradient2(label = unicode_minus,
+                       low = "#313695",
+                       mid = "#FFFFBF",
+                       high= "#A50026") +
+  labs(fill = "log<sub>2</sub>(expression)") +
+  md_theme_bw()
+
+legend <- ggpubr::get_legend(legend)
+
+ggsave("legend.png",
+       plot = legend,
+       path = plotsdir,
+       width = 1.5,
+       height = 1.6,
+       dpi = 600)
+
+plot_SCALE <- ggdraw() +
+  draw_image(file.path(plotsdir, "legend.png"))
+
+plot_ENG <-ggdraw() +
+  draw_image(file.path(plotsdir, "ENG_SCRNASEQ.png")) +
+  draw_label("1", 
+             x = 0.225, 
+             y = 0.4,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("2", 
+             x = 0.3, 
+             y = 0.29,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("3", 
+             x = 0.275, 
+             y = 0.2,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("4", 
+             x = 0.75, 
+             y = 0.9,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("5", 
+             x = 0.4, 
+             y = 0.8,
+             fontface = "bold",
+             size = label_size)
+
+plot_FLT1 <- ggdraw() +
+  draw_image(file.path(plotsdir, "FLT1_SCRNASEQ.png")) +
+  draw_label("1", 
+             x = 0.225, 
+             y = 0.4,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("2", 
+             x = 0.3, 
+             y = 0.29,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("3", 
+             x = 0.275, 
+             y = 0.2,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("4", 
+             x = 0.75, 
+             y = 0.9,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("5", 
+             x = 0.4, 
+             y = 0.8,
+             fontface = "bold",
+             size = label_size)
+
+plot_LYVE1 <- ggdraw() +
+  draw_image(file.path(plotsdir, "LYVE1_SCRNASEQ.png")) +
+  draw_label("1", 
+             x = 0.225, 
+             y = 0.4,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("2", 
+             x = 0.3, 
+             y = 0.29,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("3", 
+             x = 0.275, 
+             y = 0.2,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("4", 
+             x = 0.75, 
+             y = 0.9,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("5", 
+             x = 0.4, 
+             y = 0.8,
+             fontface = "bold",
+             size = label_size)
+
+plot_PECAM1 <- ggdraw() +
+  draw_image(file.path(plotsdir, "PECAM1_SCRNASEQ.png")) +
+  draw_label("1", 
+             x = 0.225, 
+             y = 0.4,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("2", 
+             x = 0.3, 
+             y = 0.29,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("3", 
+             x = 0.275, 
+             y = 0.2,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("4", 
+             x = 0.75, 
+             y = 0.9,
+             fontface = "bold",
+             size = label_size) +
+  draw_label("5", 
+             x = 0.4, 
+             y = 0.8,
+             fontface = "bold",
+             size = label_size) +
+   draw_plot(plot_SCALE, 
+             x = .75, 
+             y = 0.025,
+             width = 0.2,
+             height = 0.2)
+
+plots <- list(plot_ENG, 
+              plot_FLT1, 
+              plot_LYVE1,
+              plot_PECAM1)
+
+
+figure <- plots %>% 
+  wrap_plots(ncol = 2) +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"),
+        plot.title = element_text(hjust=0.5, size=20)) &
+  theme(plot.margin = margin(2,2,2,2,"mm"))
+
+ggsave(plot = figure,
+       filename = paste(figure_name, "pdf", sep = "."),
+       device = CairoPDF,
+       path = label,
+       width = width,
+       height = width,
+       dpi = dpi)
+```
+
+
+# Figure differentially expressed genes
+
+```{r figure04}
+library(patchwork)
+
+figure_name = "figure04"
+
+volcano_plots <- import(file.path(plotsdir, paste(accession, "limma_volcanoplots", "RDS", sep=".")))
+
+
+plots <- list(volcano_plots$TEC.CD31vsNEC.CD31,
+              volcano_plots$TEC.CD105vsNEC.CD105)
+  
+
+figure <- plots %>% 
+  wrap_plots(ncol = 2,
+             guides = "collect") +
+  plot_annotation(tag_levels = list(c("A", "D", "B", "E", "C", "F"))) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"),
+        plot.title = element_text(hjust=0.5, size=10),
+        legend.position = "bottom")
+
+ggsave(plot = figure,
+       filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       path = label,
+       scale = 1.0,
+       width = page_width,
+       height = page_width,
+       dpi = dpi)
+
+```
+
+# Figure pathways
+
+```{r figure04}
+library(patchwork)
+
+figure_name = "figure04a"
+
+volcano_plots <- import(file.path(plotsdir, paste(accession, "limma_volcanoplots", "RDS", sep=".")))
+
+
+plots <- list(volcano_plots$TEC.CD31vsNEC.CD31,
+              volcano_plots$TEC.CD105vsNEC.CD105)
+  
+
+figure <- plots %>% 
+  wrap_plots(ncol = 2,
+             guides = "collect") +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"),
+        plot.title = element_text(hjust=0.5, size=10),
+        legend.position = "bottom")
+
+ggsave(plot = figure,
+       filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       path = label,
+       scale = 1.0,
+       width = width,
+       height = width*1/2,
+       dpi = dpi)
+
+```
+
+# Figure GSVA - PATHWAYS
+
+```{r figure04}
+library(patchwork)
+library(cowplot)
+
+figure_name = "figure04"
+volcano_plots_limma <- rio::import(file.path(plotsdir, paste(accession, "limma_volcanoplots", "RDS", sep=".")))
+volcano_plots_gsva <- rio::import(here::here(plotsdir, paste(accession, "gsva_volcanoplots", "RDS", sep=".")))
+
+plots <- list(volcano_plots_limma$TEC.CD31vsNEC.CD31,
+              volcano_plots_limma$TEC.CD105vsNEC.CD105,
+              volcano_plots_gsva$TEC.CD31vsNEC.CD31,
+              volcano_plots_gsva$TEC.CD105vsNEC.CD105)
+  
+
+figure <- plots %>% 
+  wrap_plots(ncol = 2) +
+  plot_annotation(tag_levels = "A") +
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"))
+
+ggsave(plot = figure,
+       filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       path = label,
+       scale = 1.0,
+       width = page_width,
+       height = page_width,
+       units = "mm",
+       dpi = dpi)
+
+```
+
+# Figure Dendro-Heatmap
+
+```{r figure05}
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+library(Cairo)
+
+figure_name <- "figure05"
+
+# load all plots
+dendro <- ggdraw() +
+  draw_image(file.path(plotsdir, "dendro.png"))
+
+heatmap <- readRDS(file.path(plotsdir, paste("HeatmapPlot", accession, "RDS", sep=".")))
+
+zK_plot <- rio::import(here::here(plotsdir, "zK_plot.RDS"))
+
+ISA_dendro <- rio::import(here::here(plotsdir, "ISA_dendro.RDS"))
+
+net <- readRDS(file.path(resultsdir, paste(accession, "net", "RDS", sep = ".")))
+modulecolors <- net$refinedColors
+modules_location <- c(modules_location_up, modules_location_down)
+modules_activation <- c(modules_activation_up, modules_activation_down)
+
+# calculate the module membership
+membership <- moduleEigengenes(net$params$datExpr, modulecolors)$eigengenes %>%
+  signedKME(net$params$datExpr, ., corFnc = net$params$corType) %>%
+  data.frame %>%
+  dplyr::select(!matches("kME0")) %>%
+  mutate(membership = apply(.,1,max)) %>%
+  mutate(module = paste("M", modulecolors, sep = "")) %>%
+  mutate(color = WGCNA::labels2colors(modulecolors)) %>%
+  filter(module != "M0") %>%
+  dplyr::select(membership, module, color)
+
+membership_total <- membership %>%
+  mutate(module = "overall",
+         color = "grey")
+
+plot_data <- rbind(membership, membership_total) %>%
+  dplyr::filter(module %in% c(modules_location, modules_activation, "overall")) %>%
+  mutate(module = factor(module, levels = c("overall", modules_location, modules_activation))) %>%
+  arrange(module) %>%
+  mutate(color = factor(color, levels = unique(color)))
+  
+
+plot_membership <- plot_data %>%
+  ggplot(aes(x = module,
+             y = membership,
+             fill = module)) +
+  geom_violin(stat="ydensity",
+              size = 0.25) +
+  scale_fill_manual(values=levels(plot_data$color),
+                    guide = FALSE) +
+  geom_boxplot(width=0.1,
+               fill = "white",
+               size = 0.25,
+               outlier.size=0.1) +
+  geom_hline(yintercept = 0.8,
+             color = "red") +
+  ylim(0, 1) +
+  labs(x = "module",
+       y = "module membership") +
+  theme_bw(base_size = base_size) +
+  theme(axis.text.x = element_text(angle=90))
+
+# define the layout
+layout <- "ABBBBB\nCDDDDD"
+
+# construct the figure
+figure <- zK_plot +
+  dendro + 
+  heatmap + plot_membership +
+  plot_layout(design = layout) +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"))
+
+ggsave(filename = paste(figure_name, "pdf", sep = "."), 
+       plot = figure,
+       path = label,
+       device = CairoPDF,
+       width = page_width,
+       height = page_width,
+       units = "mm",
+       dpi = dpi)
+
+```
+
+# Figure eigengeneplots
+
+```{r figure06}
+library(ggplot2)
+library(ggraph)
+library(tidygraph)
+library(patchwork)
+
+figure_name = "figure06"
+
+eigengeneplots <- import(here::here(plotsdir, paste("EigengenePlotsViolin", accession, "RDS", sep="."))) %>%
+  extract(c(modules_location, modules_activation))
+
+remove_y_axis <- c(2,3,5,6)
+
+for (i in remove_y_axis){
+  eigengeneplots[[i]] <-
+    eigengeneplots[[i]] +
+    theme(axis.title.y = element_blank())
+}
+
+plots <- eigengeneplots
+
+figure <- plots %>% 
+  wrap_plots(ncol = 3) +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"))
+
+
+ggsave(filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       plot = figure,
+       path = label,
+       width = page_width,
+       height = page_width,
+       units = "mm",
+       dpi = dpi)
+
+
+```
+
+
+# Figure Module plots location
+
+```{r figure07}
+library(ggplot2)
+library(ggraph)
+library(tidygraph)
+library(patchwork)
+
+
+figure_name <- "figure07"
+
+# define the dotplot function
+
+network_plots <- import(file.path(resultsdir, "network_plots.RDS")) %>%
+  extract(c(modules_location_up, modules_location_down))
+scatterplots <- import(here::here(plotsdir, "scatter_plots_CLUSTERPROFILER_modules.RDS")) %>%
+  extract(c(modules_location_up, modules_location_down))
+eigengeneplots <- import(here::here(plotsdir, paste("EigengenePlotsViolin", accession, "RDS", sep="."))) %>%
+  extract(c(modules_location_up, modules_location_down))
+
+plots <- list()
+for (i in 1:3){
+  plots <- append(plots, 
+                  list(#eigengeneplots[[i]],
+                  network_plots[[i]],
+                  scatterplots[[i]]))
+}
+
+labels <- 
+
+figure <- plots %>% 
+  wrap_plots(ncol = 2,
+             guides = "collect") +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold",
+                                hjust = 0,
+                                vjust = 0),
+        plot.title = element_text(hjust=0.5, size=10),
+        legend.position = "bottom")
+
+# calculate the figure dimensions
+figure_width <- page_width
+ratio <- 5/3
+
+if ((figure_width * ratio) > page_height){
+  figure_width <- page_height / ratio
+  figure_height <- page_height
+} else {
+  figure_width <- page_width
+  figure_height <- page_width * ratio
+}
+
+# save the plot
+ggsave(filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       plot = figure,
+       path = label,
+       width = figure_width,
+       height = figure_height,
+       units = "mm",
+       dpi = dpi)
+
+
+```
+
+# Figure Module plots activation
+
+```{r figure08}
+library(ggplot2)
+library(ggraph)
+library(tidygraph)
+library(patchwork)
+
+
+figure_name <- "figure08"
+
+# define the dotplot function
+
+network_plots <- import(file.path(resultsdir, "network_plots.RDS")) %>%
+  extract(c(modules_activation_up, modules_activation_down))
+scatterplots <- import(here::here(plotsdir, "scatter_plots_CLUSTERPROFILER_modules.RDS")) %>%
+  extract(c(modules_activation_up, modules_activation_down))
+eigengeneplots <- import(here::here(plotsdir, paste("EigengenePlotsViolin", accession, "RDS", sep="."))) %>%
+  extract(c(modules_activation_up, modules_activation_down))
+
+
+plots <- list()
+for (i in 1:3){
+  plots <- append(plots, 
+                  list(# eigengeneplots[[i]],
+                  network_plots[[i]],
+                  scatterplots[[i]]))
+}
+
+
+figure <- plots %>% 
+  wrap_plots(ncol = 2,
+             guides = "collect") +
+  plot_annotation(tag_levels = tag_levels) &
+  theme(plot.tag = element_text(size = tag_size,
+                                face = "bold"),
+        plot.title = element_text(hjust=0.5, size=10),
+        legend.position = "bottom")
+
+# calculate the figure dimensions
+figure_width <- page_width
+ratio <- 5/3
+
+if (figure_width * ratio > page_height){
+  figure_width <- page_height / ratio
+  figure_height <- page_height
+} else {
+  figure_width <- figure_width
+  figure_height <- figure_width * ratio
+}
+
+# save the plot
+ggsave(filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       plot = figure,
+       path = label,
+       width = figure_width,
+       height = figure_height,
+       units = "mm",
+       dpi = dpi)
+```
+
+# Figure drug-gene interactions
+
+```{r figure09}
+library(ggplot2)
+library(ggraph)
+library(tidygraph)
+library(patchwork)
+
+
+figure_name <- "figure09"
+
+# define the dotplot function
+
+plots <- rio::import(here::here(resultsdir, "PPI_network_plots.RDS"))
+
+plots <- plots %>%
+  extract("turquoise")
+
+figure <- plots %>% 
+  wrap_plots
+
+figure_width <- page_width * 3/4
+ratio <- 2/3
+
+if (figure_width * ratio > page_height){
+  figure_width <- page_height / ratio
+  figure_height <- page_height
+} else {
+  figure_width <- figure_width
+  figure_height <- figure_width * ratio
+}
+
+
+ggsave(filename = paste(figure_name, "pdf", sep = "."),
+       device = pdf,
+       plot = figure,
+       path = label,
+       scale = 1,
+       width = figure_width,
+       height = figure_height,
+       units = "mm",
+       dpi = dpi)
+
+```
+
+# Supplementars Figure for Pathways
+
+```{r suplementary_pathways}
+library(patchwork)
+library(cowplot)
+
+graphs <- c("Cell_Cycle.png", "Chemokine_signaling_pathway.png", "Apoptosis.png", "Retinoblastoma_Gene_in_Cancer.png", "MAPK_Signaling_Pathway.png")
+names(graphs) <-  graphs %>% str_replace("\\.png", "")
+
+figure <- graphs %>%
+  purrr::map2(.,
+             names(.),
+             function(x,y){
+    plots <- list(graph_a = ggdraw() +
+                    draw_image(here::here(plotsdir, "PECAM1", x)) +
+                    labs(title=str_replace_all(y, "_", " ")),
+                  graph_b = ggdraw() +
+                    draw_image(here::here(plotsdir, "ENG", x)))
+    figure <- plots %>%
+      wrap_plots(ncol = 1,
+                 guides = "collect") +
+      plot_annotation(tag_levels = tag_levels) &
+      theme(plot.tag = element_text(size = tag_size,
+                                    face = "bold"),
+            plot.title = element_text(hjust=0.5, size=10),
+            legend.position = "bottom")
+  })
+
+ggsave(plot = figure$Cell_Cycle,
+       filename = "figure_S1.pdf",
+       device = pdf,
+       path = here::here(label),
+       scale = 1.0,
+       width = width,
+       height = width*4/3,
+       dpi = dpi)
+
+ggsave(plot = figure$Chemokine_signaling_pathway,
+       filename = "figure_S2.pdf",
+       device = pdf,
+       path = here::here(label),
+       scale = 1.0,
+       width = width,
+       height = width*4/3,
+       dpi = dpi)
+
+ggsave(plot = figure$Retinoblastoma_Gene_in_Cancer,
+       filename = "figure_S3.pdf",
+       device = pdf,
+       path = here::here(label),
+       scale = 1.0,
+       width = width,
+       height = width*4/3,
+       dpi = dpi)
+
+ggsave(plot = figure$MAPK_Signaling_Pathway,
+       filename = "figure_S4.pdf",
+       device = pdf,
+       path = here::here(label),
+       scale = 1.0,
+       width = width,
+       height = width*4/3,
+       dpi = dpi)
+
+ggsave(plot = figure$Apoptosis,
+       filename = "figure_S5.pdf",
+       device = pdf,
+       path = here::here(label),
+       scale = 1.0,
+       width = width,
+       height = width*4/3,
+       dpi = dpi)
+
+
+```
+

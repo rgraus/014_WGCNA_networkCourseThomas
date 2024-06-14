@@ -1,0 +1,734 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+source(here::here("InitializeProject.R"))
+accession <- c("E-TABM-53")
+
+
+unicode_minus <- function(x){
+  sub('^-', '\U2212', format(x))
+}
+
+scientific_10 <- function(x) {
+  x %>%
+    purrr::map_chr(function(x){
+      gsub("e", " %*% 10^", scales::scientific_format()(x))
+    })
+}
+```
+
+
+```{r get_data}
+library(affy)
+
+# determin which files to download
+cel_files <- dir(here::here(datadir, accession),
+                 pattern = "CEL$")
+
+# construct an abatch object
+abatch <- ReadAffy(filenames = cel_files,
+                   celfile.path = here::here(datadir, accession),
+                   verbose = TRUE)
+
+# read sample annotation
+sample_annotation <- rio::import(here::here(datadir, accession, paste0(accession, ".sdrf.txt"))) %>%
+  remove_rownames()
+
+# canonize column names
+colnames(sample_annotation) <- colnames(sample_annotation) %>%
+  make.names(unique = TRUE)
+
+# add rownames to the sample annotation
+sample_annotation <- sample_annotation %>%
+  dplyr::mutate(rowname = Array.Data.File) %>%
+  column_to_rownames()
+
+# annotate the abatch object
+pData(abatch) <- sample_annotation[sampleNames(abatch),]
+
+# save everything
+abatch %>%
+  rio::export(here::here(datadir, paste0(accession, "_abatch.RDS")))
+
+
+```
+
+
+```{r QC}
+library(arrayQualityMetrics)
+library(AnnotationDbi)
+
+database <- hgu133a.db::hgu133a.db
+
+feature_annotation <- AnnotationDbi::select(database,
+                                           columns = c("PROBEID",
+                                                       "ENTREZID",
+                                                       "ENSEMBL",
+                                                       "SYMBOL",
+                                                       "GENENAME"),
+                                           keys = keys(database, keytype = "PROBEID"),
+                                           keytype = "PROBEID") %>%
+  group_by(PROBEID) %>%
+  summarize_all(function(x){paste(unique(x), collapse = ", ")}) %>%
+  mutate(rowname = PROBEID) %>%
+  column_to_rownames
+
+abatch <- rio::import(here::here(datadir, paste0(accession, "_abatch.RDS")))
+
+QC <- arrayQualityMetrics(abatch,
+                          outdir = here::here(resultsdir, "QC_abatch"),
+                          do.logtransform = TRUE,
+                          force = TRUE)
+QC %>%
+  rio::export(here::here(resultsdir, paste0(accession, "_QC_abatch.RDS")))
+
+outliers <- QC$modules[[11]]@outliers@which
+
+outliers %>%
+  rio::export(here::here(datadir, "outliers_abatch.RDS"))
+
+eset <- affy::rma(abatch)
+
+QC <- arrayQualityMetrics(eset,
+                          outdir = here::here(resultsdir, "QC_eset"),
+                          do.logtransform = TRUE,
+                          force = TRUE)
+QC %>%
+  rio::export(here::here(resultsdir, paste0(accession, "_QC_eset.RDS")))
+
+outliers_eset <- QC$modules %>%
+  purrr::map(function(module){
+    module@outliers@which
+  }) %>%
+  unlist %>%
+  names
+
+outliers_total <- c(outliers, outliers_eset) %>%
+  unique
+
+eset <- eset[, !(sampleNames(eset) %in% outliers_total)]
+
+
+fData(eset) <- feature_annotation[featureNames(eset),]
+
+eset %>%
+  rio::export(here::here(datadir, paste0(accession, "_eset.RDS")))
+
+```
+
+```{r WGCNA} 
+library(Biobase)
+library(mixtools)
+library(genefilter)
+library(WGCNA)
+
+# enable multithreading in WGCNA
+enableWGCNAThreads(10)
+options(stringsAsFactors = FALSE)
+
+eset <- rio::import(here::here(datadir, paste0(accession, "_eset.RDS")))
+
+selected_samples <- eset$Source.Name %>%
+  str_detect("NK", negate = TRUE)
+
+eset_selected <- eset[,selected_samples]
+
+# optional: filter the ExpressionSet object
+eset.wgcna <- eset_selected
+
+# Outlier check via zKonnectivity
+eset_wgcna <- eset.wgcna
+
+expression <- exprs(eset_wgcna)
+
+ISA <- (cor(expression) + 1)/2^2
+
+ISA %>%
+  rio::export(here::here(resultsdir, "ISA.RDS"))
+
+networkConcepts <- WGCNA::networkConcepts(expression,
+                                          power = 2,
+                                          networkType = "signed")
+
+networkConcepts %>%
+  rio::export(here::here(resultsdir, "networkConcepts.RDS"))
+
+connectivity <- networkConcepts$Connectivity
+clustercoefficient <- networkConcepts$ClusterCoef
+zK <- (connectivity - mean(connectivity))/sd(connectivity)
+zC <- (clustercoefficient - mean(clustercoefficient))/sd(clustercoefficient)
+
+outliers <- names(zK)[abs(zK) > 2]
+
+eset_wgcna <- eset_wgcna[,!(sampleNames(eset_wgcna) %in% outliers)]
+
+# define the params for WGCNA
+params <- list(networkType = "signed",
+               corType = "bicor",
+               maxBlockSize = 25000,
+               # TOMType = "signed",
+               minModuleSize = 30,
+               reassignThreshold = 1e-6,
+               detectCutHeight = .998,
+               mergeCutHeight = 0.15,
+               deepSplit = 4,
+               numericLabels = TRUE,
+               pamStage = FALSE,
+               pamRespectsDendro = TRUE,
+               verbose = 6,
+               datExpr = t(exprs(eset_wgcna)))
+
+powers = c(seq(1,10,by=1), seq(12,20, by=2));
+
+sft = pickSoftThreshold(params$datExpr,
+                        corFnc = bicor,
+                        RsquaredCut = 0.8,
+                        powerVector=powers,
+                        networkType = params$networkType,
+                        verbose = 6)
+beta <- sft$powerEstimate
+
+if (is.na(beta)){
+  if (params$networkType == "unsigned"){
+    beta <- 6
+  } else {
+    beta <- 12
+  }
+}
+
+collectGarbage();
+params$power <- beta
+
+net <- do.call(blockwiseModules, c(params))
+
+# attach the underlying parameters and data
+net$params <- as.list(args(blockwiseModules))
+net$params[names(params)] <- params
+net$eset <- eset_wgcna
+
+net %>%
+  rio::export(here::here(resultsdir, "net.RDS"))
+
+```
+
+```{r make_dendrogram}
+library(tidyverse)
+library(magrittr)
+library(WGCNA)
+library(Biobase)
+library(cowplot)
+
+# get the network and the data
+
+net <- rio::import(here::here(resultsdir, "net.RDS"))
+height <- 5.2/3*2
+
+png(filename = file.path(plotsdir, "dendro.png"),
+    width = height * 2,
+    height = height,
+    units = "in",
+    res = 300
+    # pointsize = font_size
+)
+par(mar = c(0,0,0,0))
+WGCNA::plotDendroAndColors(net$dendrograms[[1]],
+                           colors = data.frame(colors=labels2colors(net$colors)),
+                           dendroLabels = FALSE,
+                           main = "",
+                           groupLabels = c("modules"),
+                           cex.colorLabels = 0.75,
+                           cex.axis = 0.5,
+                           cex.lab = 0.8,
+                           marAll = c(0,4,0,0),
+                           lwd = 0.5)
+dev.off()
+plot <- ggdraw() +
+  draw_image(file.path(plotsdir, "dendro.png")) %T>%
+saveRDS(file.path(plotsdir, paste("DendrogramPlot", accession, "RDS", sep=".")))
+```
+
+```{r biologic_context_clusterprofiler}
+library(Biobase)
+library(genefilter)
+library(clusterProfiler)
+library(WGCNA)
+library(Biobase)
+library(org.Hs.eg.db)
+library(msigdbr)
+
+net <- rio::import(here::here(resultsdir, "net.RDS"))
+
+eset <- net$eset
+
+selected_features <- fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA', GENENAME)) %>%
+  dplyr::select(PROBEID) %>%
+  deframe()
+
+universe <- eset[selected_features,] %>%
+  fData() %>%
+  dplyr::select(PROBEID, ENTREZID) %>%
+  deframe()
+
+genes <- data.frame(module = paste("M", net$colors, sep = ""),
+                    gene = fData(net$eset)$ENTREZID) %>%
+  dplyr::filter(module != "M0") %>%
+  nest(gg = -"module") %>%
+  deframe %>%
+  purrr::map(deframe)
+
+biologic_context_BP <- genes %>%
+  purrr::map(function(x){
+    try(enrichGO(x,
+                 OrgDb = "org.Hs.eg.db",
+                 ont = "BP",
+                 pvalueCutoff = 1,
+                 qvalueCutoff = 1,
+                 readable = TRUE
+                 ))
+  })
+
+biologic_context_BP %>%
+  rio::export(here::here(resultsdir, "CLUSTERPROFILER_RESULTS_BP_MODULES.RDS"))
+
+biologic_context_BP %>%
+  purrr::map(data.frame) %>%
+  rio::export(here::here(resultsdir, "CLUSTERPROFILER_RESULTS_BP_MODULES.xlsx"))
+
+####
+msigdb <- msigdbr(species = "Homo sapiens")
+
+term2gene <- msigdb %>%
+  dyr::filter(gs_subcat == "CP:WIKIPATHWAYS") %>%
+  dplyr::select(gs_id, gene_symbol)
+
+term2gene_list <- 
+
+term2name <- msigdb %>%
+  dplyr::select(gs_id, gs_name) %>%
+  distinct
+
+modules <- net$colors
+
+feature_data <- fData(net$eset) %>%
+  extract(names(modules),)
+
+names(modules) <- feature_data$SYMBOL
+
+gene <- data.frame(ID = paste0("M", modules),
+                   genes = names(modules)) %>%
+  dplyr::filter(ID != "M0") %>%
+  dplyr::filter(genes != "NA") %>%
+  tidyr::nest(gg = -"ID") %>%
+  deframe %>%
+  purrr::map(deframe)
+
+universe <- feature_data$SYMBOL %>%
+  unique
+
+library(furrr)
+plan(multisession, workers = 10)
+
+enrichment <- gene %>%
+  furrr::future_map(function(gene, universe, term2gene, term2name){
+    enricher(gene = gene,
+             pvalueCutoff = 1,
+             qvalueCutoff = 1,
+             TERM2GENE = term2gene,
+             TERM2NAME = term2name,
+             universe = universe)
+  },
+  universe = universe,
+  term2gene = term2gene,
+  term2name = term2name)
+
+enrichment %>%
+  purrr::map(data.frame) %>%
+  rio::export(here::here(resultsdir, "enrichment.xlsx"))
+
+
+```
+
+```{r calculate_association}
+library(WGCNA)
+library(lmerTest)
+library(Biobase)
+library(mdthemes)
+
+net <- rio::import(here::here(resultsdir, "net.RDS"))
+
+# correlate traits with module eigengenes
+#pdata <- pData(net$eset) %>%
+#  dplyr::select(SAMPLEID, PATID, CELLTYPE, MARKER) %>%
+#  mutate(PATID = as.character(PATID)) %>%
+#  mutate(CELLTYPE = factor(CELLTYPE,
+#                           levels = c("NEC", "TEC"))) %>%
+#  mutate(MARKER = factor(MARKER,
+#                             levels = c("CD31", "CD105")))
+
+# Define numbers of genes and samples
+moduleColors = paste("M", net$color, sep = "")
+nSamples <- nrow(net$params$datExpr)
+
+# Recalculate MEs with color labels
+MEs <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  dplyr::select(!matches("MEgrey"))
+
+# calculate the correlation
+# moduleTraitCor <- cor(MEs, as.matrix(traits), use = "p")
+# calculate the p-value for the correlation coefficient
+# moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+# Alternatively do a mixed effect model as described in Li et al
+
+# define the model
+# formula <- Y ~ CELLTYPE + MARKER + (1|PATID)
+
+# create a dataframe for input
+#lmeData <- MEs %>% 
+#  rownames_to_column("SAMPLEID") %>%
+#  pivot_longer(cols = starts_with("ME"),
+#               values_to ="Y",
+#               names_to = "MODULE") %>%
+#  inner_join(pdata)
+
+# Apply the linear model per Module
+#lmeResult <- lmeData %>%
+#  tidyr::nest(group = -"MODULE") %>%
+#  mutate_at(
+#    "group",
+#    purrr::map,
+#    function(x){
+#      lmerTest::lmer(formula = formula,
+#           data = x) %>%
+#        summary() %>%
+#        extract("coefficients") %>%
+#        .$coefficients %>%
+#        data.frame(stringsAsFactors = FALSE) %>%
+#        rownames_to_column("COEFFICIENT")    
+#      }) %>%
+#  deframe() %>%
+#  bind_rows(.id = "MODULE") %>%
+#  dplyr::rename(p.value = Pr...t..) %>%
+#  mutate(adj.P.Val = p.adjust(p.value, 
+#                              method = "hochberg")) %>%
+#  dplyr::filter(COEFFICIENT != "(Intercept)") %>%
+#  mutate(COEFFICIENT = str_replace(COEFFICIENT, "TEC", "")) %>%
+#  mutate(COEFFICIENT = str_replace(COEFFICIENT, "CD105", ""))
+# calculate the t-statustics
+#moduleTraitCor <- lmeResult %>%
+#  dplyr::select(MODULE, COEFFICIENT, t.value) %>%
+#  pivot_wider(names_from = COEFFICIENT,
+#              values_from = t.value)  %>%
+#  column_to_rownames("MODULE")
+
+# calculate the adjusted p-value
+#moduleTraitPvalue <-  lmeResult %>%
+#  dplyr::select(MODULE, COEFFICIENT, adj.P.Val) %>%
+#  pivot_wider(names_from = COEFFICIENT,
+#              values_from = adj.P.Val)  %>%
+#  column_to_rownames("MODULE")
+
+traits <- data.frame(CTNNB1 = net$eset$Characteristics..Genotype.,
+                     WT1 = net$eset$Characteristics..IndividualGeneticCharacteristics.,
+                     row.names = sampleNames(net$eset)) %>%
+  dplyr::filter(CTNNB1 != "") %>%
+  dplyr::mutate(CTNNB1 = factor(CTNNB1, levels = c ("CTNNB1 not mutated", "CTNNB1 mutated")),
+                WT1 = factor(WT1, levels = c ("WT1 not mutated", "WT1 mutated"))) %>%
+  dplyr::mutate(CTNNB1 = as.numeric(CTNNB1),
+                WT1 = as.numeric(WT1)) %>%
+  as.matrix
+
+MEs <- MEs[rownames(traits),]
+
+moduleTraitCor <- cor(MEs, traits)
+moduleTraitPvalue <- corPvalueFisher(moduleTraitCor, 
+                                     nrow(moduleTraitCor))
+
+order <- hclust(dist(moduleTraitCor))$order
+moduleTraitCor <- moduleTraitCor[order,]
+moduleTraitPvalue <- moduleTraitPvalue[rownames(moduleTraitCor),]
+
+
+# convert the matrices into a data frame, with module annotation
+moduleTraitPvalue <- moduleTraitPvalue %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  pivot_longer(!matches("module"))
+
+moduleTraitCor <- moduleTraitCor %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  pivot_longer(!matches("module")) %T>%
+  # save module trait cor
+  saveRDS(file.path(resultsdir, "ModuleTraitCor.RDS"))
+
+heatmap_data <- full_join(moduleTraitCor, moduleTraitPvalue, 
+                      by = c("module", "name")) %>%
+  mutate(label = paste(signif(value.x, 2), " (",
+                       signif(value.y, 1), ")", sep = "")) %>%
+  # select relevant columns
+  dplyr::select(module, name, value.x, label) %>%
+  
+  # rename them accordingly
+  dplyr::rename(Y = module, X = name, value = value.x) %>%
+  mutate(X = factor(X, levels = c("CTNNB1", "WT1"))) %T>%
+  rio::export(file.path(resultsdir, "hatmap_data.RDS"))
+
+matrix <- heatmap_data %>%
+  pivot_wider(id_cols = X,
+              names_from = Y,
+              values_from = value) %>%
+  data.frame() %>%
+  column_to_rownames("X") %>%
+  t()
+
+cluster <- matrix %>% 
+  dist() %>%
+  hclust(method = "average")
+
+order <- rownames(matrix)[cluster$order]
+
+heatmap_data <- heatmap_data %>%
+  # mutate(X = ifelse(X == "CELLTYPE", "Origin","Activation")) %>%
+  mutate(X = factor(X, levels = c("CTNNB1", "WT1"))) %>%
+  mutate(Y = factor(Y, levels = order)) %>%
+  mutate(label = str_replace(label, "e", " %*% 10^"))
+
+base_size = 10 # defines the font size in plots
+
+heatmap <- ggplot(heatmap_data,
+                  aes(x=X, 
+                      y=Y, 
+                      fill=value)) + 
+  geom_tile() +
+  geom_text(aes(label=label),
+            size = 1,
+            parse = TRUE) +
+  scale_fill_gradient2(labels = unicode_minus,
+                       low = "blue",
+                       mid = "white",
+                       high= "red",
+                       limits = c(-1,1),
+                       guide = guide_colorbar(label = TRUE,
+                                              draw.ulim = TRUE, 
+                                              draw.llim = TRUE,
+                                              ticks = FALSE, 
+                                              nbin = 10,
+                                              label.position = "right",
+                                              barwidth = 0.125,
+                                              barheight = 3, 
+                                              direction = "vertical")) +
+  ylab("module") +
+  xlab("") +
+  labs(fill = "t-statistics") +
+  md_theme_bw(base_size = base_size) +
+  as_md_theme(theme(axis.ticks = element_blank(),
+        axis.title.y = element_text(size = base_size*0.7),
+        axis.text.x = element_text(angle = 90, 
+                                   hjust = 1,
+                                   size = base_size*0.5),
+        axis.text.y = element_text(size = base_size*0.5),
+        legend.title = element_text( size=4), 
+        legend.text=element_text(size=4),
+        legend.position="right"))
+  # save the plot
+heatmap %>%
+  rio::export(here::here(plotsdir, paste("HeatmapPlot", accession, "RDS", sep=".")))
+```
+
+```{r make_eigengenplots}
+library(tidyverse)
+library(magrittr)
+library(ggpubr)
+library(WGCNA)
+library(limma)
+library(mdthemes)
+## get the network and the data
+net <- rio::import(here::here(resultsdir, "net.RDS"))
+
+# define the groups. The ordering of the groups in the plot happens here !!!
+groups <- factor(make.names(paste(net$eset$Characteristics..Genotype., 
+                       net$eset$Characteristics..IndividualGeneticCharacteristics., sep = "_")),
+                 levels = c("CTNNB1.not.mutated_WT1.not.mutated",
+                            "CTNNB1.mutated_WT1.not.mutated",
+                            "CTNNB1.not.mutated_WT1.mutated",
+                            "CTNNB1.mutated_WT1.mutated",
+                            "_"))
+
+# define comparisons
+my_comparisons <- list(c("CTNNB1.mutated_WT1.not.mutated", "CTNNB1.not.mutated_WT1.not.mutated"),
+                    c("CTNNB1.not.mutated_WT1.mutated", "CTNNB1.not.mutated_WT1.not.mutated"),
+                    c("CTNNB1.mutated_WT1.mutated", "CTNNB1.not.mutated_WT1.not.mutated"))
+
+# extract the module colors
+moduleColors = paste("M", net$colors, sep = "")
+
+# Calculate MEs with color labels
+data <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  
+  # remove grey
+  dplyr::select(-MEM0) %>%
+  
+  # rename the color names from ME<color> to <color>
+  rename_all(~ str_replace(.,"ME", "")) %>%
+  
+  # add the sampleID
+  rownames_to_column(var = "SAMPLE") %>%
+  
+  # add the groups
+  mutate(GROUP = groups) %>%
+  
+  # pivot to long representation
+  pivot_longer(!(matches("SAMPLE") | matches("GROUP")),
+               names_to = "MODULE",
+               values_to = "VALUE") %>%
+  
+  # add the color
+  mutate(COLOR = WGCNA::labels2colors(as.numeric(str_replace(MODULE, "M", ""))))
+
+base_size = 10 # font size for plots
+
+eigengene.plots.violin <- data %>%
+  tidyr::nest(GROUP = -"MODULE") %>%
+  deframe() %>%
+  purrr::map2(names(.),
+              function(x,y){
+                # calculate the p-values
+                comparison <- compare_means(VALUE ~ GROUP, 
+                                            x, 
+                                            method = "t.test", 
+                                            p.adjust.method = "hochberg") %>%
+                  #mutate(y.position = c(0.875, 1)) %>%
+                  # mutate(x.min = c()) %>%
+                  mutate(p.sci = paste(scientific_10(p.adj))) %>%
+                  # mmutate(p.sci = paste("expression(", p.sci, ")", sep = "")) %>%
+                  dplyr::filter(p.adj < 0.05)
+                # call the plotting function
+                ggplot(x, aes(x = GROUP,
+                              y = VALUE))+ 
+                  geom_violin(stat="ydensity",
+                              fill = unique(x$COLOR),
+                              size = 0.25) +
+                  geom_boxplot(width=0.1,
+                               size = 0.25,
+                               outlier.size=0.1) +
+                  ylim(-1, 1) +
+                  annotate(geom = "text",
+                           x = 1,
+                           y = 1,
+                           label = paste("Module:", y),
+                           size = 2,
+                           hjust = 0) +
+                  #geom_text(x = 1, 
+                  #          y = 1,
+                  #          label = paste("Module:", y)) +
+                  geom_hline(yintercept = 0,
+                             size = 0.25) +
+                  labs(x = "",
+                       y = "eigengene expression") +
+                  scale_x_discrete(labels = c("Control",
+                                              "CTNNB1 mutated",
+                                              "WT1 mutated",
+                                              "Double mutation",
+                                              "Fetal kidney")) +
+                  #stat_compare_means(comparisons = my_comparisons) +
+                  #stat_pvalue_manual(comparison, 
+                  #                   label = "{paste(text = p.sci)}",
+                  #                   size = 2.1234) +
+                  #geom_signif(y_position = comparison$y.position,
+                  #            annotations = comparison$p.sci,
+                  #            xmin = comparison$group1, 
+                  #            xmax = comparison$group2,
+                  #            parse = TRUE,
+                  #            size = 0.2,
+                  #            textsize = 1.75) +
+                  theme_bw(base_size = base_size) +
+                  theme(axis.text.x = element_text(angle=90))
+                }
+  )
+
+
+  # save everything
+eigengene.plots.violin %>%
+ rio::export(here::here(plotsdir, paste("EigengenePlotsViolin", accession, "RDS", sep=".")))
+
+```
+
+```{r construct networks}
+library(Biobase)
+library(tidygraph)
+library(WGCNA)
+library(igraph)
+
+net <- rio::import(here::here(resultsdir, "net.RDS"))
+
+featureData <- net$eset %>%
+  fData
+
+moduleColors <- net$colors
+
+adjacency <- net$params$datExpr %>%
+  WGCNA::adjacency(type = net$params$networkType,
+                   power = net$params$power,
+                   corFnc = net$params$corType)
+
+
+connectivity <-  adjacency %>%
+  intramodularConnectivity(moduleColors) %>%
+  rownames_to_column("PROBEID") %>%
+  mutate(module = moduleColors) %>%
+  group_by(module) %>%
+  mutate(kWithin.norm = kWithin/max(kWithin)) %>%
+  ungroup() %>%
+  inner_join(featureData) %>%
+  select(PROBEID, SYMBOL, kTotal, kWithin, kWithin.norm, kOut, kDiff, module)
+
+# save the module konnectivity as xlsx
+connectivity %>%
+  mutate(module = WGCNA::labels2colors(module)) %>% ## this can be changed
+  tidyr::nest(gg = -"module") %>%
+  deframe %>%
+  rio::export(here::here(resultsdir, "connectivity.xlsx"))
+
+adjacency <- adjacency[moduleColors != 0, moduleColors != 0]
+
+network <- adjacency %>%
+  as_tbl_graph(directed = FALSE) %>%
+  activate(nodes)
+
+rm(adjacency)
+gc()
+network <- network %>%
+  activate(nodes) %>%
+  inner_join(connectivity, by=c("name" = "PROBEID"))
+
+network %>%
+  rio::export(here::here(datadir, "network.RDS"))
+
+threshold <- 0.1 # take the top 10%
+# threshold <- 0.9
+
+networks_thresholded <- network %>%
+  activate(edges) %>%
+  arrange(weight) %>%
+  activate(nodes) %>%
+  dplyr::arrange(desc(kWithin.norm)) %>%
+  group_by(module) %>%
+  mutate(fraction = (row_number()-1)/n()) %>% # filtering procedure, should be adapted
+  dplyr::filter(fraction <= threshold) %>%
+  # dplyr::filter(kWithinNorm > thershold) %>%
+  ungroup %>%
+  to_split(module) %>%
+  set_names(str_replace(names(.), "module: ", ""))
+
+
+```
+

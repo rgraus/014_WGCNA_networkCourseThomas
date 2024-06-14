@@ -1,0 +1,316 @@
+---
+title: "Co-expression network analysis with R"
+author: "Thomas Mohr"
+date: "SS2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: yes
+    keep_md: true
+  # pdf_document:
+  #   extra_dependencies: ["float"]
+  #   toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	eval = FALSE,
+	fig.pos = "!H",
+	message = FALSE,
+	warning = FALSE,
+	include = TRUE,
+	out.extra = ""
+)
+library(tidyverse)
+library(magrittr)
+```
+
+# Co-expression network analysis with R
+
+## Scope of the lecture
+
+- What is Co-expression analysis ?
+- How to get and prepare the data
+- Network concepts
+- Methods of co-expression analysis
+  - WGCNA
+  - ARACNe
+  - GeneNet
+- practical example:
+  - Data preparation
+  - WGCNA
+  - GeneNet
+  - Biologic context of modules
+
+## Time frame
+
+- Afternoon 1: General concepts
+- Afternoon 2: Practical work
+- Afternoon 3: Practical work
+- Afternoon 4: Practical work - discussion
+
+# What is Gene Co-expression Analysis ?
+
+
+## The ratio behind co-expression analysis
+
+- Genes act in cooperation and not individually
+- These cooperating units can be viewed as modules of genes
+- Pathways are a subtype of modules, but cross pathway communication is largely a terra icognita → using modules may overcome this shortcoming.
+- Network based methods instead of reporting a list of individual parts are a natural approach to understanding such a “system”.
+- Focus on modules as opposed to individual genes → this greatly alleviates multiple testing problem
+
+
+## What is a Gene Regulatory Network ?
+
+![Gene regulatory network](Images/GRN.png)
+
+## A few network concepts - network types
+
+A network or graph is a pair (V,E), where V is a set of vertices (or nodes) and E is a set of edges connecting the vertices
+
+![Types of networks](Images/networktypes.png)
+
+(A) represents a directed network, (B) an undirected network, and (C) represents a weighted network with edge weight represented by edge thickness.
+
+# Network concepts
+
+## Z transformation
+
+- Formula: $z=\frac{x-\overline{x}}{s}$
+
+- Transforms a dataset into a gaussian distribution (mean = zero, standard deviation = 1)
+
+- Enables the comparison between values of different distributions and locations: mean +/- 2s ~ p-value of < 0.05 → quick‘n dirty test for statistical significance
+
+- We will use the prefix „z“ as denominator of z-transformed values
+
+## Adjacency
+
+The adjacecy is a measure how strongly two nodes are connected.
+
+In co-expression networks, correlations are often used to construct an adjacency matrix:
+
+- unsigned $a_{ij} = |cor(x_i, x_j)|^\beta$
+
+- signed $a_{ij} = |0.5+0.5cor(x_i, x_j)|^\beta$
+
+## Scale free topology
+
+In a scale free network the degree function follows
+
+$$P(k) \sim K^\lambda$$
+
+That means that there are 
+
+- few highly connected nodes 
+- many less connected nodes.
+
+Scale free networks can be found in many situations such as protein interaction, traffic and social networks   
+
+
+## Correlation networks
+
+Given two vectors v~i~ and v~j~, the pearson correlation is given as 
+
+$$\rho_{i,j} = \frac{v_{i}.v_{j}}{||v_{i}||.||v_{j}||}$$
+
+In practice, a set of *N* samples and *G* genes gives a *GXG* matrix of pairwise gene correlations.
+Other correlations measures may be the Spearman or the Kendall correlation coefficient.
+
+Example: Weighted Gene Coexpression Network Anaylsis
+
+Limitations:
+
+   - Correlations because of common regulators: g -> j -> k translates into g -> k
+   - Limited sample sizes may produce correlations that are not significant.
+   
+## Information theory based networks
+
+The mutual information between two variables is defined as
+
+$$MI[X,Y] = \sum_{x_{i}, y_{i}}P(x_i, y_i)log\frac{P(x_i,y_i)}{P(x_i)P(y_i)}$$
+With P being the probability functions of the variables.
+The mutual information is a measure for the dependency of one gene on the other.
+
+Examples: ARACNe, MRNET and CLR
+
+Limitations:
+
+   - computationally expensive
+   - sometimes sensitive to noise
+
+## Regression based networks
+
+regression based networks calculate the edge weight based on a regression model
+
+$$x_{gi} = \sum_{i\neq g}w_jx_{ij}+\epsilon_{i}$$
+
+The regression formula gives directed gene regulator networks.
+
+Examples: TIGRESS and GENIE3
+
+Limitations:
+
+   - Directed networks
+   - computationally expensive
+   - require a sufficient number of samples
+   
+## Gaussian Graphical Models
+
+this approach uses multivariate normal distributions (Gaussians) described by
+
+$$p(x|m,\Sigma) = \frac{1}{\sqrt{2\pi|\Sigma}}exp[-\frac12(x-m)^T\Sigma^{-1}(x-m)]$$
+To determin the edge weights the partial correlation matrix is used. The *partial correlation* between two genes is the correlation that remains if the effect of all other genes is removed.
+
+Limitations:
+
+   - Does not work on non normal data
+   - Assumes a linear regulation between genes
+   - Needs a sufficiently high number of samples.
+
+## Bayesian Networks
+
+![Bayesian networks. calculation of prior probabilities](Images/bayesiana.png){height=1.5cm}
+
+![Bayesian networks. posterior probabilities in a sample can be calculated using the given network](Images/bayesian2.png){height=1.5cm}
+
+- Limitations
+   - computationally expensive, do not scale well
+   - network structure difficult to determin
+   
+
+## Dynamic Bayesian Networks
+
+![Example of a Dynamic Bayesian Network with four nodes: static representation (with cycles) on the left, and unrolled dynamic representation on the right.](Images/dynbayesian.png)
+
+Limitations
+
+   - extremely computational expensive
+
+   - Assumption of a linear dynamic kinetics - patiularly time points
+
+## Differential equations
+
+Differential equation models are described by the function
+$$\frac{dX}{dt}=f(x,\Theta, u(t), t)$$
+with x being the gene expression, $\Theta$ a set of parameters, u(t) a set of external signals, and the time t.
+
+
+# Implementations
+
+## Tools
+
+Tool |Type               | Implementations
+-----|-------------------|----------------
+WGCNA|Correlation network|R package
+ARACne|Mutual Information Network|Java
+CLR|Mutual Information Network|Matlab
+MRNET|Mutual Information Network|R package
+GENIE3|Tree based|MATLAB, R, and python
+GeneNet|Gaussian Graphical Models|R package
+CatNet|Bayesian networks|R package
+Banjo|Bayesian networks|Java
+G1DBN|Dynamic Bayesian Networks|R package
+GRENITS|Dynamic Bayesian Netwoks|R package
+TSNI|Differential equations based|MATLAB
+Inferelator|Differential equations based|
+
+
+## Benchmarking
+
+Benchmarking tool: netbenchmark, for benchmarking GRN performance
+
+# Weighted Gene Co-expression Network Analysis
+
+
+
+## How to check scale free topology ?
+
+:::columns
+::::column
+
+![correlation plot of log transformed p(k) and k](Images/scalefree.png){width=4cm}
+
+::::
+::::column
+- Idea: log transform p(k) and k
+
+- $log(p(k)) \sim -\lambda log(k)$
+
+- The correlation coefficient squared ($r^2$) can be used as index to quantify the goodness of fit
+
+- In reality, one would chose $\beta = 1,2,3,...,n$ and calculate $r^2$ for each $\beta$. 
+
+- A $\beta$ leading to an $r^2$ of larger than 0.85 would be chosen
+
+::::
+:::
+## Network concepts - Gene Segnificance
+
+Gene significance denotes the significance of a gene for a given scientific question. In general it can be calculated by:
+
+$$GS_i = -log(pvalue_i)$$
+
+The only assumption is that $GS_i = 0$ denotes nodes that are not significant for a given process.
+
+However, $GS_i$ could also be an indicator that equals 1 if prior knowledge suggests that node i is known to be important and 0 otherwise.
+
+
+## The topological overlap dissimilarity is used as input of hierarchical clustering
+
+What is the topological overlap ?
+
+The topological overlap describes how many neihgbours are shared between two nodes:
+
+
+$$TOM_{ij} = \frac{\sum{a_{iu}a_{uj}}+a_{ij}}{min(k_i, k_j) + 1 - a_{ij}}$$
+
+The TOM based distance is calculated by
+
+$$DistTOM_{ij} = 1 - TOM_{ij}$$
+
+## Intramodular Connectivity
+
+Intramodular connectivity kIN with respect to a given module (say the Blue module) is defined as the sum of adjacencies with the members of the module.
+
+For unweighted networks=number of direct links to intramodular nodes
+
+For weighted networks= sum of connection strengths to intramodular nodes
+
+$$kIN_i^{module} = \sum_{j \in module}a_{ij}$$
+
+## Module significance
+
+The module significance is the mean gene significance of the members of the module
+
+The module significance measure can be used to address a major goal of gene network analysis: the identification of biologically significant modules or pathways.
+
+# Example
+
+# Putting modules into biologic context
+
+## Unsupervised co-expression analysis
+
+## Supervised co-expression analysis
+
+- Modules are predefined based on pathways, GO-terms, etc.
+
+- The workflow is the same, except for the clustering and module detection which is replaced by the module definition step
+
+- The network concepts (intramodular connectivity, adjacency, density) are the same
+
+- Supervised co-expression analysis mostly compares several networks
+
+## Hepatocellular carcinoma associated endothelial cells
+   
+
+# Conclusion
+
+## Take home message
+
+We have implemented several algorithms able to deduce gene regulatory networks from given data, provided the sample size is large enough.

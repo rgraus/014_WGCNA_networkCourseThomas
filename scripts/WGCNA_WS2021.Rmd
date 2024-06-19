@@ -1,0 +1,1041 @@
+---
+output: html_notebook
+# editor_options: 
+#   chunk_output_type: console
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+source(here::here("InitializeProject.R"))
+```
+# start script from line 338
+
+```{r organize_data_PRAD2}
+library(Biobase)
+library(DESeq2)
+library(org.Hs.eg.db) # change according to your organism
+# This junk prepares data according to your needs. In this case, we read a counts matrix and convert it into an ENTREZID based Expression Set
+
+# First, we create an ENTREZID based DESeq2 object, preprocess the object, covert the expression data into a vst transformed matrix and construct an ExpressionSet.
+
+# read the counts table. This section has to be changed accordung to the data you havem see DESeq2 workflow.
+
+counts <- rio::import(here::here(datadir, "TCGA-PRAD-counts.RDS"))
+```
+
+
+```{r organize_data_PRAD1}
+# read the sample annotation
+pdata <- rio::import(here::here(datadir, "TCGA-PRAD-pdata.RDS"))
+
+# create a map between ENSEMBLE and ENTREZID
+map <- AnnotationDbi::select(org.Hs.eg.db,
+                             columns = c("ENTREZID",
+                                         "ENSEMBL"),
+                             keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
+  drop_na
+
+# convert the ENSEMBLE based count matrix into ENTREZ based counts 
+counts_entrezid <- counts %>%
+  rownames_to_column("ENSEMBL") %>%
+  inner_join(map) %>%
+  dplyr::select(ENTREZID, starts_with ("TCGA")) %>%
+  dplyr::group_by(ENTREZID) %>%
+  summarize_all(sum) %>%
+  column_to_rownames("ENTREZID")
+
+
+# create an annotation for the features
+fdata <- AnnotationDbi::select(org.Hs.eg.db,
+                             columns = c("ENTREZID",
+                                         "ENSEMBL",
+                                         "SYMBOL",
+                                         "GENENAME"),
+                             keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
+  group_by(ENTREZID) %>%
+  summarize(ENSEMBL = paste(unique(ENSEMBL), collapse = ", "),
+            SYMBOL = paste(unique(SYMBOL), collapse = ", "),
+            GENENAME = paste(unique(GENENAME), collapse = ", ")) %>%
+  mutate(rowname = ENTREZID) %>%
+  column_to_rownames
+
+# create a DESeq2 object. The formula is a dummy so that DESeq2 works
+
+dds <- DESeqDataSetFromMatrix(countData = counts_entrezid,
+                              colData = pdata[colnames(counts_entrezid),],
+                              design = ~ 1)
+
+featureData <- fdata[rownames(dds),] # this has to be done to ensure that the order is met
+mcols(dds) <- DataFrame(mcols(dds), featureData)
+
+# filter out lowly expressed genes
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+# save the DESeq2 object
+dds %>%
+  rio::export(here::here(datadir, "TCGA_PRAD.DEseqDataSet.RDS"))
+
+# apply variance stabilizing transfrmation
+dds_vst <- dds %>%
+  vst
+
+# create an ExpressionSet for WGCNA
+eset <- ExpressionSet(assay(dds_vst))
+pData(eset) <- colData(dds_vst) %>% data.frame
+fData(eset) <- rowData(dds_vst) %>% data.frame
+
+
+
+eset %>%
+  rio::export(here::here(datadir, "ExpressionSet_WGCNA_PRAD.RDS")) # change name according to your needs
+
+# and we are set for the analysis
+
+```
+
+```{r organize_data_Melanoma}
+library(Biobase)
+library(DESeq2)
+library(org.Hs.eg.db) # change according to your organism
+# This junk prepares data according to your needs. In this case, we read a counts matrix and convert it into an ENTREZID based Expression Set
+
+# First, we create an ENTREZID based DESeq2 object, preprocess the object, covert the expression data into a vst transformed matrix and construct an ExpressionSet.
+
+# read the dds object
+
+dds <- rio::import(here::here(datadir, "GSE158403.DESeq2.RDS"))
+
+# remove the version from the ensemblgene IDs
+
+rownames(dds) <- str_sub(rownames(dds), 1, 15)
+
+# extract counts
+
+counts <- assay(dds) %>%
+  data.frame
+
+# extract pdata
+pdata <- colData(dds) %>%
+  data.frame
+
+# create a map between ENSEMBLE and ENTREZID
+map <- AnnotationDbi::select(org.Hs.eg.db,
+                             columns = c("ENTREZID",
+                                         "ENSEMBL"),
+                             keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
+  drop_na
+
+# convert the ENSEMBLE based count matrix into ENTREZ based counts 
+counts_entrezid <- counts %>%
+  rownames_to_column("ENSEMBL") %>%
+  inner_join(map) %>%
+  dplyr::select(ENTREZID, starts_with ("SRR")) %>%
+  dplyr::group_by(ENTREZID) %>%
+  summarize_all(sum) %>%
+  column_to_rownames("ENTREZID")
+
+
+# create an annotation for the features
+fdata <- AnnotationDbi::select(org.Hs.eg.db,
+                             columns = c("ENTREZID",
+                                         "ENSEMBL",
+                                         "SYMBOL",
+                                         "GENENAME"),
+                             keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
+  group_by(ENTREZID) %>%
+  summarize(ENSEMBL = paste(unique(ENSEMBL), collapse = ", "),
+            SYMBOL = paste(unique(SYMBOL), collapse = ", "),
+            GENENAME = paste(unique(GENENAME), collapse = ", ")) %>%
+  mutate(rowname = ENTREZID) %>%
+  column_to_rownames
+
+# create a DESeq2 object. The formula is a dummy so that DESeq2 works
+
+dds <- DESeqDataSetFromMatrix(countData = counts_entrezid,
+                              colData = pdata[colnames(counts_entrezid),],
+                              design = ~ 1)
+
+featureData <- fdata[rownames(dds),] # this has to be done to ensure that the order is met
+mcols(dds) <- DataFrame(mcols(dds), featureData)
+
+# filter out lowly expressed genes
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+# save the DESeq2 object
+dds %>%
+  rio::export(here::here(datadir, "Melanoma.DEseqDataSet.RDS"))
+
+# apply variance stabilizing transfrmation
+dds_vst <- dds %>%
+  vst
+
+# create an ExpressionSet for WGCNA
+eset <- ExpressionSet(assay(dds_vst))
+pData(eset) <- colData(dds_vst) %>% data.frame
+fData(eset) <- rowData(dds_vst) %>% data.frame
+
+
+
+eset %>%
+  rio::export(here::here(datadir, "ExpressionSet_WGCNA_MELANOMA.RDS")) # change name according to your needs
+
+# and we are set for the analysis
+
+```
+
+
+```{r WGCNA_main_body_PRAD1}
+library(Biobase)
+library(mixtools)
+library(genefilter)
+library(WGCNA)
+library(DESeq2)
+library(org.Hs.eg.db)
+# enable multithreading in WGCNA
+enableWGCNAThreads(10)
+options(stringsAsFactors = FALSE)
+
+# load relavent data
+eset <- rio::import(here::here(datadir, "ExpressionSet_WGCNA_PRAD.RDS"))
+```
+```{r}
+sort(colnames(pData(eset)))
+```
+- **rg: there is no column MARKER**  
+
+```{r WGCNA_main_body_PRAD2}
+# filter sample - this has to be changed according to your needs
+
+# selected.samples = pData(eset) %>%
+#   filter(MARKER !="NA") %>%
+#   .$SAMPLEID
+
+# to switch off this filter: comment if you want filtering
+selected_samples <- sampleNames(eset)
+```
+
+```{r}
+fData(eset)
+```
+
+```{r WGCNA_main_body_PRAD3}
+# select features
+selected_features = fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA|smnall nucleolar RNA', GENENAME)) %>%
+  rownames # these are the entry IDs
+length(selected_features)
+```
+- 9000 genes are filtered out
+
+```{r WGCNA_main_body_PRAD4}
+# to switch off this filter: comment if you want filtering
+# selected_features <- featureNames(eset)
+  
+# optional: take all
+# selected.features = c(1:nFeatcolt))
+  
+# filter based on ENTREZID and remove duplicates
+eset_wgcna <- eset[selected_features,selected_samples]
+```
+
+
+```{r WGCNA_main_body_PRAD5}
+# optional: filter the set by fitting a MOG and selecting genes with a posterior 2 > 0.5
+# rg: what is a MOG? What is the principle? 
+mixmdl <- as.numeric(exprs(eset_wgcna)) %>% 
+  sort() %>%
+  normalmixEM()
+
+
+# determine the threshold
+threshold <- mixmdl$x[min(which(mixmdl$posterior[,2] > 0.5))]
+
+# which genes are below the threshold in all samples ?
+selected_genes <- apply(exprs(eset_wgcna),
+                  1,
+                  function(x, threshold){
+                    return(!(sum(x<threshold) == length(x)))
+                  },
+                  threshold = threshold) %>%
+  names(.)[.]
+
+# to switch off this filter: comment if you want filtering
+selected_genes <- featureNames(eset_wgcna)
+
+# optional: filter the ExpressionSet object
+eset_wgcna <- eset_wgcna[selected_genes,]
+
+# extract the expression matrix
+expression <- exprs(eset_wgcna)
+
+
+ISA <- (cor(expression) + 1)/2^2
+
+ISA %>%
+  rio::export(here::here(resultsdir, "ISA.RDS"))
+
+networkConcepts <- WGCNA::networkConcepts(expression,
+                                          power = 2,
+                                          networkType = "signed")
+
+networkConcepts %>%
+  rio::export(here::here(resultsdir, "networkConcepts.RDS"))
+
+connectivity <- networkConcepts$Connectivity
+clustercoefficient <- networkConcepts$ClusterCoef
+zK <- (connectivity - mean(connectivity))/sqrt(sd(connectivity))
+zC <- (clustercoefficient - mean(clustercoefficient))/sqrt(sd(clustercoefficient))
+
+outliers <- names(zK)[abs(zK) > 2]
+
+expresssion_outlier_removed <- expression[,!(colnames(expression) %in% outliers)]
+
+espression_outlier_removed <- expression
+# eset_wgcna <- eset_wgcna[,!(sampleNames(eset_wgcna) %in% outliers)]
+
+# define the params for WGCNA
+params <- list(networkType = "signed",
+               corType = "bicor",
+               maxBlockSize = 35000,
+               # TOMType = "signed",
+               minModuleSize = 30,
+               reassignThreshold = 1e-6,
+               detectCutHeight = .998,
+               mergeCutHeight = 0.15,
+               deepSplit = 4,
+               numericLabels = TRUE,
+               pamStage = TRUE,
+               pamRespectsDendro = TRUE,
+               verbose = 6,
+               datExpr = t(expresssion_outlier_removed))
+# Choose a set of soft-thresholding powers
+
+
+
+powers = c(seq(1,10,by=1), seq(12,20, by=2));
+sft = pickSoftThreshold(params$datExpr,
+                        corFnc = bicor,
+                        RsquaredCut = 0.8,
+                        powerVector=powers,
+                        networkType = params$networkType,
+                        verbose = 6)
+```
+
+
+```{r WGCNA_main_body_PRAD6}
+beta <- sft$powerEstimate # Berni and Renia beta <- 12
+if (is.na(beta)){
+  if (params$networkType == "unsigned"){
+    beta <- 6
+  } else {
+    beta <- 12
+  }
+}
+```
+
+
+```{r WGCNA_main_body_PRAD7}
+collectGarbage();
+params$power <- beta
+
+### construct the network in a one-step process using iterative WGCNA
+# the result is a network object containing the additional element of "refinedColors".
+
+net <- do.call(blockwiseModules, c(params)) 
+```
+```{r}
+net
+```
+```{r}
+# net <- do.call(iterativeWGCNA, c(params)) # if not wanted - blockwiseModules)
+
+# attach the underlying parameters and data
+#net$params <- as.list(args(iterativeWGCNA))
+net$params <- as.list(args(blockwiseModules))
+net$params[names(params)] <- params
+net$eset <- eset_wgcna
+# save the net object and we are finished
+net %>%
+  rio::export(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+```
+
+
+```{r WGCNA_main_body_MELANOMA}
+library(Biobase)
+library(mixtools)
+library(genefilter)
+library(WGCNA)
+library(DESeq2)
+library(org.Hs.eg.db)
+# enable multithreading in WGCNA
+enableWGCNAThreads(10)
+options(stringsAsFactors = FALSE)
+
+# load relavent data
+eset <- rio::import(here::here(datadir, "ExpressionSet_WGCNA_MELANOMA.RDS"))
+
+# filter sample - this has to be changed according to your needs
+
+selected.samples = pData(eset) %>%
+  # filter(MARKER !="NA") %>% # rg: does not work, column not in pData
+  .$SAMPLEID
+
+# to switch off this filter: comment if you want filtering
+selected_samples <- sampleNames(eset)
+
+# select features
+selected_features = fData(eset) %>%
+  filter(!grepl('uncharacterized|pseudogene|antisense RNA|smnall nucleolar RNA', GENENAME)) %>%
+  rownames
+
+# to switch off this filter: comment if you want filtering
+selected_features <- featureNames(eset)
+  
+# optional: take all
+# selected.features = c(1:nFeatcolt))
+  
+# filter based on ENTREZID and remove duplicates
+eset_wgcna <- eset[selected_features,selected_samples]
+
+
+
+# optional: filter the set by fitting a MOG and selecting genes with a posterior 2 > 0.5
+mixmdl <- as.numeric(exprs(eset_wgcna)) %>% 
+  sort() %>%
+  normalmixEM()
+
+
+# determine the threshold
+threshold <- mixmdl$x[min(which(mixmdl$posterior[,2] > 0.5))] # rg: this is NA
+
+# which genes are below the threshold in all samples ?
+selected_genes <- apply(exprs(eset_wgcna),
+                  1,
+                  function(x, threshold){
+                    return(!(sum(x<threshold) == length(x)))
+                  },
+                  threshold = threshold) %>%
+  names(.)[.]
+
+# to switch off this filter: comment if you want filtering
+selected_genes <- featureNames(eset_wgcna)
+
+# optional: filter the ExpressionSet object
+eset_wgcna <- eset_wgcna[selected_genes,]
+
+# extract the expression matrix
+expression <- exprs(eset_wgcna)
+
+
+ISA <- (cor(expression) + 1)/2^2
+
+ISA %>%
+  rio::export(here::here(resultsdir, "ISA_MELANOMA.RDS"))
+
+networkConcepts <- WGCNA::networkConcepts(expression,
+                                          power = 2,
+                                          networkType = "signed")
+
+networkConcepts %>%
+  rio::export(here::here(resultsdir, "networkConcepts_MELANOMA.RDS"))
+
+connectivity <- networkConcepts$Connectivity
+clustercoefficient <- networkConcepts$ClusterCoef
+zK <- (connectivity - mean(connectivity))/sqrt(sd(connectivity))
+zC <- (clustercoefficient - mean(clustercoefficient))/sqrt(sd(clustercoefficient))
+
+outliers <- names(zK)[abs(zK) > 2]
+
+expresssion_outlier_removed <- expression[,!(colnames(expression) %in% outliers)]
+
+# eset_wgcna <- eset_wgcna[,!(sampleNames(eset_wgcna) %in% outliers)]
+
+# define the params for WGCNA
+params <- list(networkType = "signed",
+               corType = "bicor",
+               maxBlockSize = 35000,
+               # TOMType = "signed",
+               minModuleSize = 30,
+               reassignThreshold = 1e-6,
+               detectCutHeight = .998,
+               mergeCutHeight = 0.15,
+               deepSplit = 2,
+               numericLabels = TRUE,
+               pamStage = TRUE,
+               pamRespectsDendro = FALSE,
+               verbose = 6,
+               datExpr = t(expresssion_outlier_removed))
+# Choose a set of soft-thresholding powers
+
+
+
+powers = c(seq(1,10,by=1), seq(12,20, by=2));
+sft = pickSoftThreshold(params$datExpr,
+                        corFnc = bicor,
+                        RsquaredCut = 0.8,
+                        powerVector=powers,
+                        networkType = params$networkType,
+                        verbose = 6)
+
+beta <- sft$powerEstimate # Berni and Renia beta <- 12
+if (is.na(beta)){
+  if (params$networkType == "unsigned"){
+    beta <- 6
+  } else {
+    beta <- 12
+  }
+}
+
+collectGarbage();
+params$power <- beta
+
+### construct the network in a one-step process using iterative WGCNA
+# the result is a network object containing the additional element of "refinedColors".
+
+net <- do.call(blockwiseModules, c(params)) 
+
+#net <- do.call(iterativeWGCNA, c(params)) # if not wanted - blockwiseModules)
+
+# attach the underlying parameters and data
+net$params <- as.list(args(iterativeWGCNA))
+net$params <- as.list(args(blockwiseModules))
+net$params[names(params)] <- params
+net$eset <- eset_wgcna
+# save the net object and we are finished
+net %>%
+  rio::export(here::here(datadir, "WGCNA_network_MELANOMA.RDS"))
+
+```
+
+
+```{r make_dendrogram1}
+library(tidyverse)
+library(magrittr)
+library(WGCNA)
+library(Biobase)
+library(cowplot)
+
+# get the network and the data
+net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+
+height <- 5.2/3*2 # rg: what do you calculate here, is this the optimal height, and why?
+
+png(filename = file.path(plotsdir, "dendro.png"),
+    width = height * 2,
+    height = height,
+    units = "in",
+    res = 300
+    # pointsize = font_size
+)
+
+par(mar = c(0,0,0,0))
+WGCNA::plotDendroAndColors(net$dendrograms[[1]],
+                           colors = data.frame(colors=labels2colors(net$colors[net$goodGenes])),
+                           dendroLabels = FALSE,
+                           main = "",
+                           groupLabels = c("modules"),
+                           cex.colorLabels = 0.75,
+                           cex.axis = 0.5,
+                           cex.lab = 0.8,
+                           marAll = c(0,4,0,0),
+                           lwd = 0.5)
+dev.off()
+```
+- rg: plot is not saved, but is drawn
+
+```{r}
+WGCNA::plotDendroAndColors(net$dendrograms[[1]],
+                           colors = data.frame(colors=labels2colors(net$colors[net$goodGenes])),
+                           dendroLabels = FALSE,
+                           main = "",
+                           groupLabels = c("modules"),
+                           cex.colorLabels = 0.75,
+                           cex.axis = 0.5,
+                           cex.lab = 0.8,
+                           marAll = c(0,4,0,0),
+                           lwd = 0.5)
+```
+
+- rg: next code geht nicht, weil es png nicht speichert  
+```{r make_dendrogram3}
+# rg: what are you doing here? Can you import the png file, and then save the png file as RDS file? 
+plot <- ggdraw() +
+  draw_image(file.path(plotsdir, "dendro.png")) %T>%
+saveRDS(file.path(plotsdir, paste("DendrogramPlot", "RDS", sep=".")))
+```
+
+```{r calculate_association}
+library(WGCNA)
+library(lmerTest)
+library(Biobase)
+
+net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+```
+
+```{r}
+pData(net$eset)
+```
+
+```{r calculate_association1}
+# correlate traits with module eigengenes
+pdata <- pData(net$eset) %>%
+  dplyr::select(barcode, sample_type) %>%
+  mutate(SAMPLEID = barcode) %>%
+  mutate(sample_type = case_when(sample_type == "Solid Tissue Normal" ~ "NORMAL",
+                                 sample_type == "Primary Tumor" ~ "TUMOR",
+                                 TRUE ~ "TUMOR")) %>%
+  mutate(sample_type = factor(sample_type,
+                              levels = c("NORMAL", "TUMOR")))
+pdata
+```
+
+
+```{r calculate_association2}
+# Define numbers of genes and samples
+moduleColors = paste("M", net$colors, sep = "")
+head(moduleColors)
+length(moduleColors)
+```
+- rg: each gene belongs to a specific module, and each module has specific color
+
+```{r calculate_association3}
+(nSamples <- nrow(net$params$datExpr))
+```
+- rg: was sind die nSamples?
+```{r}
+eset_wgcna
+```
+
+
+```{r calculate_association4}
+# Recalculate MEs with color labels
+# rg:MEs == module eigengenes?
+(MEs <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  dplyr::select(!matches("M0")))
+
+```
+- rg: what is the interpretation of the MEs? For a sample with a high MEM1, what does it mean? 
+
+```{r calculate_association5}
+traits <- pdata %>%
+  dplyr::select(sample_type) %>%
+  mutate(sample_type = as.numeric(sample_type)) %>%
+  as.matrix
+head(traits)
+```
+- rg: what is sample type?
+
+```{r calculate_association66}
+# calculate the correlation
+moduleTraitCor <- cor(MEs, as.matrix(traits[rownames(MEs),]), use = "p") # rg: what is correlated here? how is corr. calculated if y argument is matrix?
+```
+
+
+```{r calculate_association67}
+# calculate the p-value for the correlation coefficient
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+# from help page: corPvalueStudent
+# Description
+# Calculates Student asymptotic p-value for given correlations.
+# Usage
+# corPvalueStudent(cor, nSamples)
+# Arguments
+# cor 	
+# A vector of correlation values whose corresponding p-values are to be calculated
+# nSamples 	
+# Number of samples from which the correlations were calculated
+```
+
+
+```{r calculate_association7}
+# Alternatively do a mixed effect model as described in Li et al
+
+# define the model
+formula <- Y ~ sample_type + (1|prior_malignancy)
+#
+# create a dataframe for input
+lmeData <- MEs %>% 
+  rownames_to_column("SAMPLEID") %>%
+  pivot_longer(cols = starts_with("ME"),
+               values_to ="Y",
+               names_to = "MODULE") %>%
+  inner_join(pdata)
+
+# Apply the linear model per Module
+#lmeResult <- lmeData %>%
+#  tidyr::nest(group = -"MODULE") %>%
+#  mutate_at(
+#    "group",
+#    purrr::map,
+#    function(x){
+#      lmerTest::lmer(formula = formula,
+#           data = x) %>%
+#        summary() %>%
+#        extract("coefficients") %>%
+#        .$coefficients %>%
+#        data.frame(stringsAsFactors = FALSE) %>%
+#        rownames_to_column("COEFFICIENT")    
+#      }) %>%
+#  deframe() %>%
+#  bind_rows(.id = "MODULE") %>%
+#  dplyr::rename(p.value = Pr...t..) %>%
+#  mutate(adj.P.Val = p.adjust(p.value, 
+#                              method = "hochberg")) %>%
+#  dplyr::filter(COEFFICIENT != "(Intercept)") %>%
+#  mutate(COEFFICIENT = str_replace(COEFFICIENT, "TEC", "")) %>%
+#  mutate(COEFFICIENT = str_replace(COEFFICIENT, "CD105", ""))
+
+# calculate the t-statistics
+#moduleTraitCor <- lmeResult %>%
+#  dplyr::select(MODULE, COEFFICIENT, t.value) %>%
+#  pivot_wider(names_from = COEFFICIENT,
+#              values_from = t.value)  %>%
+#  column_to_rownames("MODULE")
+
+# calculate the adjusted p-value
+#moduleTraitPvalue <-  lmeResult %>%
+#  dplyr::select(MODULE, COEFFICIENT, adj.P.Val) %>%
+#  pivot_wider(names_from = COEFFICIENT,
+#              values_from = adj.P.Val)  %>%
+#  column_to_rownames("MODULE")
+#
+```
+- rg: was macht man mit LmerData?  
+
+```{r calculate_association88}
+order <- hclust(dist(moduleTraitCor))$order
+moduleTraitCor <- as.matrix(moduleTraitCor)[order,]
+moduleTraitPvalue <- as.matrix(moduleTraitPvalue)[order,]
+
+
+# convert the matrices into a data frame, with module annotation
+moduleTraitPvalue <- moduleTraitPvalue %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  pivot_longer(!matches("module"))
+```
+- rg: geht nicht - was soll dieser code machen? 
+```{r}
+moduleTraitPvalue %>%
+  data.frame(stringsAsFactors = FALSE)
+```
+
+
+```{r calculate_association89}
+moduleTraitCor <- moduleTraitCor %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  pivot_longer(!matches("module")) %T>%
+  # save module trait cor
+  saveRDS(file.path(resultsdir, "ModuleTraitCor.RDS"))
+```
+```{r}
+moduleTraitPvalue <- moduleTraitPvalue %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  rownames_to_column(var = "module") %>% 
+  mutate(module_cp = module) %>% 
+  mutate(module = str_replace(module, "ME", "")) %>% 
+  column_to_rownames(var = "module_cp") %>% 
+  pivot_longer(!matches("module"))
+```
+- rg: dont understand, how heatmap data should look like
+
+```{r calculate_association888}
+heatmap_data <- full_join(moduleTraitCor, moduleTraitPvalue, 
+                      by = c("module", "name")) %>%
+  mutate(label = paste(signif(value.x, 2), " (",
+                       signif(value.y, 1), ")", sep = "")) %>%
+  # select relevant columns
+  dplyr::select(module, name, value.x, label) %>%
+  
+  # rename them accordingly
+  dplyr::rename(Y = module, X = name, value = value.x) %>%
+  mutate(X = factor(X, levels = c("CELLTYPE", "MARKER"))) %T>%
+  export(file.path(resultsdir, 
+                   paste(accession, 
+                         "association", 
+                         "RDS", 
+                         sep = ".")))
+```
+
+
+```{r make_eigengeneplots}
+library(tidyverse)
+library(magrittr)
+library(ggpubr)
+library(WGCNA)
+library(limma)
+# library(mdthemes)
+## get the network and the data
+net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+
+# define the groups. The ordering of the groups in the plot happens here !!!
+pdata <- pData(net$eset) %>%
+  dplyr::select(barcode, sample_type) %>%
+  mutate(SAMPLEID = barcode) %>%
+  mutate(sample_type = case_when(sample_type == "Solid Tissue Normal" ~ "NORMAL",
+                                 sample_type == "Primary Tumor" ~ "TUMOR",
+                                 TRUE ~ "TUMOR")) %>%
+  mutate(sample_type = factor(sample_type,
+                              levels = c("NORMAL", "TUMOR")))
+
+groups <- pdata[rownames(net$params$datExpr), "sample_type"] # rg: what is in net$params$datExpr? why 381, not all 500 samples?
+```
+
+
+```{r make_eigengeneplots33}
+# define comparisons
+comparisons <- list(c("TUMOR", "NORMAL"))
+
+# extract the module colors
+moduleColors = paste("M", net$colors, sep = "")
+
+# Calculate MEs with color labels
+data <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  
+  # remove grey - rg: why remove gray?
+  dplyr::select(-MEM0) %>%
+  
+  # rename the color names from ME<color> to <color>
+  rename_all(~ str_replace(.,"ME", "")) %>%
+  
+  # add the sampleID
+  rownames_to_column(var = "SAMPLE") %>%
+  
+  # add the groups
+  mutate(GROUP = groups) %>%
+  
+  # pivot to long representation - worauf subsetted man hier? 
+  pivot_longer(!(matches("SAMPLE") | matches("GROUP")),
+               names_to = "MODULE",
+               values_to = "VALUE") %>%
+  
+  # add the color
+  mutate(COLOR = WGCNA::labels2colors(as.numeric(str_replace(MODULE, "M", ""))))
+data
+```
+
+
+```{r make_eigengeneplots34}
+eigengene.plots.violin <- data %>%
+  tidyr::nest(GROUP = -"MODULE") %>% # listColumns: for each module in df a dataframe
+  deframe() %>% # rg: warum hier ein deframe, und nicht ueber listcolumn mappen?
+  purrr::map2(names(.),
+              function(x,y){ # x = df, y = name of dataframe, which is M1, M2, ... 
+                # calculate the p-values
+                #comparison <- compare_means(VALUE ~ GROUP, 
+                #                            x, 
+                #                            method = "t.test", 
+                #                            p.adjust.method = "hochberg") %>%
+                  # mutate(y.position = c(0.375, 0.5, 0.625, 0.75, 0.875, 1)) %>%
+                  # mutate(x.min = c()) %>%
+                  # mutate(p.sci = paste(scientific_10(p.adj))) %>%
+                  # mmutate(p.sci = paste("expression(", p.sci, ")", sep = "")) %>%
+                 # dplyr::filter(p.adj < 0.05)
+                # call the plotting function
+                ggplot(x, aes(x = GROUP,
+                              y = VALUE))+ 
+                  geom_violin(stat="ydensity",
+                              fill = unique(x$COLOR),
+                              size = 0.25) +
+                  geom_boxplot(width=0.1,
+                               size = 0.25,
+                               outlier.size=0.1) +
+                  ylim(-0.5, 0.5) +
+                  annotate(geom = "text",
+                           x = 0.5,
+                           y = 0.5,
+                           label = paste("Module:", y),
+                           size = 4,
+                           hjust = 0) +
+                  #geom_text(x = 1, 
+                  #          y = 1,
+                  #          label = paste("Module:", y)) +
+                  geom_hline(yintercept = 0,
+                             size = 0.25) +
+                  labs(x = "",
+                       y = "eigengene expression") +
+                  #scale_x_discrete(labels = c(expression(NEC^'ENG-'),
+                  #                            expression(NEC^'ENG+'),
+                  #                            expression(TEC^'ENG-'),
+                  #                            expression(TEC^'ENG+'))) +
+                  #stat_pvalue_manual(comparison, 
+                  #                   label = "{paste(text = p.sci)}",
+                  #                  size = 2.1234) +
+                  #geom_signif(y_position = comparison$y.position,
+                  #            annotations = comparison$p.sci,
+                  #            xmin = comparison$group1, 
+                  #            xmax = comparison$group2,
+                  #            parse = TRUE,
+                  #            size = 0.2,
+                  #            textsize = 1.75) +
+                  theme_bw(base_size = 10) +
+                  theme(axis.text.x = element_text(angle=90))}
+  )
+
+eigengene.plots.violin
+  # save everything
+eigengene.plots.violin %>%
+  export(here::here(plotsdir, paste("EigengenePlotsViolin", accession, "RDS", sep=".")))
+
+
+```
+
+```{r biologic_context3}
+library(clusterProfiler)
+library(msigdbr)
+
+net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+
+msigdb <- msigdbr(species = "Homo sapiens")
+
+
+
+msigdb_GO_BP <- msigdb %>%
+  dplyr::filter(gs_subcat == "GO:BP")
+
+msigdb_KEGG <- msigdb %>%
+  dplyr::filter(gs_subcat == "CP:KEGG")
+
+msigdb_WP <- msigdb %>%
+  dplyr::filter(gs_subcat == "CP:WIKIPATHWAYS")
+
+term2gene_list <- list(GO = msigdb_GO_BP %>%
+                         dplyr::select(gs_id, entrez_gene),
+                       KEGG = msigdb_KEGG %>%
+  dplyr::select(gs_id, entrez_gene),
+                      WP = msigdb_WP %>%
+  dplyr::select(gs_id, entrez_gene))
+```
+
+
+```{r biologic_context2}
+term2name_list <- list(GO = msigdb_GO_BP %>%
+                         dplyr::select(gs_id, gs_name),
+                       KEGG = msigdb_KEGG %>%
+  dplyr::select(gs_id, gs_name),
+                      WP = msigdb_WP %>%
+  dplyr::select(gs_id, gs_name))
+```
+
+
+```{r biologic_context1}
+gene_list <- data.frame(gene = names(net$colors),
+                        module = net$colors) %>%
+  dplyr::mutate(module = paste0("M", module)) %>%
+  tidyr::nest(gg = -"module") %>%
+  deframe %>%
+  purrr::map(deframe)
+# gene_list[1:2]
+```
+- list of character vectors, each character vector has gene of one module
+
+```{r biologic_context4}
+universe <- names(net$colors)
+head(universe)
+```
+
+```{r biologic_context5}
+enrichment_list <- term2name_list %>%
+  purrr::map2(term2gene_list,
+              function(term2name, term2gene, gene_list, universe){ # rg: wie kan man hier 4 argumente haben, obwohl man nur 2 input argumente hat
+                 gene_list %>%
+                  purrr::map(function(gene, universe, term2gene, term2name){
+                    gene %>%
+                      enricher(pvalueCutoff = 1,
+                               pAdjustMethod = "BH",
+                               universe = universe,
+                               qvalueCutoff = 1,
+                               TERM2GENE = term2gene,
+                               TERM2NAME = term2name)
+  },
+  universe = universe,
+  term2gene = term2gene,
+  term2name = term2name)},
+  gene_list = gene_list,
+  universe = universe)
+View(enrichment_list)
+```
+- a list of list, so for GO, KEGG, and WP, for each a list of enrichment results for each module
+
+```{r biologic_context61}
+enrichment_plots <- enrichment_list %>%
+  purrr::map(function(enrichment_list){
+    enrichment_list %>%
+      purrr::map(function(enrichment){
+        dotplot(enrichment)
+      })
+  })
+enrichment_plots[[1]][[1]]
+```
+
+
+```{r biologic_context62}
+enrichment_result <- enrichment_list %>%
+  unlist(recursive = FALSE) %>%
+  purrr::map(data.frame)
+enrichment_result[[1]]
+```
+
+
+```{r biologic_context7}
+enrichment_result %>%
+  rio::export(here::here(resultsdir, "enrichment_result.xlsx"))
+```
+
+
+```{r biologic_context8}
+enrichment_plots %>%
+  unlist(recursive = FALSE) %>%
+  purrr::map2(names(.),
+              function(plot, name){
+                filename = here::here(plotsdir, paste0(name, "_dotplot.pdf"))
+                ggsave(filename = filename,
+                       plot = plot)
+              })
+```
+
+```{r determination_of_hubgenes1}
+library(WGCNA)
+net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+
+
+moduleColors <- net$colors %>%
+  paste0("M", .)
+
+adjacency <- WGCNA::adjacency(net$params$datExpr,
+                              power = net$params$power,
+                              type = net$params$networkType,
+                              corFnc = net$params$corType)
+glimpse(adjacency)
+```
+
+
+```{r determination_of_hubgenes2}
+konnectivity <- WGCNA::intramodularConnectivity(adjacency, moduleColors) %>%
+  mutate(module = moduleColors) %>%
+   rownames_to_column("ENTREZID")
+glimpse(konnectivity)
+```
+
+
+```{r determination_of_hubgenes3}
+konnectivity_norm <- konnectivity %>%
+  tidyr::nest(gg = -"module") %>%
+  deframe %>%
+  purrr::map(function(df){
+               df %>%
+                 mutate(kWithin.norm = kWithin/max(kWithin))
+             })
+glimpse(konnectivity_norm)
+```
+

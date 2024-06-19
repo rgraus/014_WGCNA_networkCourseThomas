@@ -17,7 +17,7 @@ source(here::here("InitializeProject.R"))
 library(Biobase)
 library(DESeq2)
 library(org.Hs.eg.db) 
-vst <- readRDS("../../data/c_vst.rds")
+vst <- readRDS("./data/c_vst.rds")
 m_vst <- assay(vst)
 # change GENENAME into entrezId
 
@@ -111,94 +111,94 @@ eset %>%
 ```
 
 ```{r organize_data_Melanoma}
-library(Biobase)
-library(DESeq2)
-library(org.Hs.eg.db) # change according to your organism
-# This junk prepares data according to your needs. In this case, we read a counts matrix and convert it into an ENTREZID based Expression Set
-
-# First, we create an ENTREZID based DESeq2 object, preprocess the object, covert the expression data into a vst transformed matrix and construct an ExpressionSet.
-
-# read the dds object
-
-dds <- rio::import(here::here(datadir, "GSE158403.DESeq2.RDS"))
-
-# remove the version from the ensemblgene IDs
-
-rownames(dds) <- str_sub(rownames(dds), 1, 15)
-
-# extract counts
-
-counts <- assay(dds) %>%
-  data.frame
-
-# extract pdata
-pdata <- colData(dds) %>%
-  data.frame
-
-# create a map between ENSEMBLE and ENTREZID
-map <- AnnotationDbi::select(org.Hs.eg.db,
-                             columns = c("ENTREZID",
-                                         "ENSEMBL"),
-                             keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
-  drop_na
-
-# convert the ENSEMBLE based count matrix into ENTREZ based counts 
-counts_entrezid <- counts %>%
-  rownames_to_column("ENSEMBL") %>%
-  inner_join(fdata) %>%
-  dplyr::select(ENTREZID, starts_with ("SRR")) %>%
-  dplyr::group_by(ENTREZID) %>%
-  summarize_all(sum) %>%
-  column_to_rownames("ENTREZID")
-
-
-# create an annotation for the features
-fdata <- AnnotationDbi::select(org.Hs.eg.db,
-                             columns = c("ENTREZID",
-                                         "ENSEMBL",
-                                         "SYMBOL",
-                                         "GENENAME"),
-                             keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
-  group_by(ENTREZID) %>%
-  summarize(ENSEMBL = paste(unique(ENSEMBL), collapse = ", "),
-            SYMBOL = paste(unique(SYMBOL), collapse = ", "),
-            GENENAME = paste(unique(GENENAME), collapse = ", ")) %>%
-  mutate(rowname = ENTREZID) %>%
-  column_to_rownames
-
-# create a DESeq2 object. The formula is a dummy so that DESeq2 works
-
-dds <- DESeqDataSetFromMatrix(countData = counts_entrezid,
-                              colData = pdata[colnames(counts_entrezid),],
-                              design = ~ 1)
-
-featureData <- fdata[rownames(dds),] # this has to be done to ensure that the order is met
-mcols(dds) <- DataFrame(mcols(dds), featureData)
-
-# filter out lowly expressed genes
-
-keep <- rowSums(counts(dds)) >= 10
-dds <- dds[keep,]
-
-# save the DESeq2 object
-dds %>%
-  rio::export(here::here(datadir, "Melanoma.DEseqDataSet.RDS"))
-
-# apply variance stabilizing transfrmation
-dds_vst <- dds %>%
-  vst
-
-# create an ExpressionSet for WGCNA
-eset <- ExpressionSet(assay(dds_vst))
-pData(eset) <- colData(dds_vst) %>% data.frame
-fData(eset) <- rowData(dds_vst) %>% data.frame
-
-
-
-eset %>%
-  rio::export(here::here(datadir, "ExpressionSet_WGCNA_MELANOMA.RDS")) # change name according to your needs
-
-# and we are set for the analysis
+# library(Biobase)
+# library(DESeq2)
+# library(org.Hs.eg.db) # change according to your organism
+# # This junk prepares data according to your needs. In this case, we read a counts matrix and convert it into an ENTREZID based Expression Set
+# 
+# # First, we create an ENTREZID based DESeq2 object, preprocess the object, covert the expression data into a vst transformed matrix and construct an ExpressionSet.
+# 
+# # read the dds object
+# 
+# dds <- rio::import(here::here(datadir, "GSE158403.DESeq2.RDS"))
+# 
+# # remove the version from the ensemblgene IDs
+# 
+# rownames(dds) <- str_sub(rownames(dds), 1, 15)
+# 
+# # extract counts
+# 
+# counts <- assay(dds) %>%
+#   data.frame
+# 
+# # extract pdata
+# pdata <- colData(dds) %>%
+#   data.frame
+# 
+# # create a map between ENSEMBLE and ENTREZID
+# map <- AnnotationDbi::select(org.Hs.eg.db,
+#                              columns = c("ENTREZID",
+#                                          "ENSEMBL"),
+#                              keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
+#   drop_na
+# 
+# # convert the ENSEMBLE based count matrix into ENTREZ based counts 
+# counts_entrezid <- counts %>%
+#   rownames_to_column("ENSEMBL") %>%
+#   inner_join(fdata) %>%
+#   dplyr::select(ENTREZID, starts_with ("SRR")) %>%
+#   dplyr::group_by(ENTREZID) %>%
+#   summarize_all(sum) %>%
+#   column_to_rownames("ENTREZID")
+# 
+# 
+# # create an annotation for the features
+# fdata <- AnnotationDbi::select(org.Hs.eg.db,
+#                              columns = c("ENTREZID",
+#                                          "ENSEMBL",
+#                                          "SYMBOL",
+#                                          "GENENAME"),
+#                              keys = keys(org.Hs.eg.db, keytype = "ENTREZID")) %>%
+#   group_by(ENTREZID) %>%
+#   summarize(ENSEMBL = paste(unique(ENSEMBL), collapse = ", "),
+#             SYMBOL = paste(unique(SYMBOL), collapse = ", "),
+#             GENENAME = paste(unique(GENENAME), collapse = ", ")) %>%
+#   mutate(rowname = ENTREZID) %>%
+#   column_to_rownames
+# 
+# # create a DESeq2 object. The formula is a dummy so that DESeq2 works
+# 
+# dds <- DESeqDataSetFromMatrix(countData = counts_entrezid,
+#                               colData = pdata[colnames(counts_entrezid),],
+#                               design = ~ 1)
+# 
+# featureData <- fdata[rownames(dds),] # this has to be done to ensure that the order is met
+# mcols(dds) <- DataFrame(mcols(dds), featureData)
+# 
+# # filter out lowly expressed genes
+# 
+# keep <- rowSums(counts(dds)) >= 10
+# dds <- dds[keep,]
+# 
+# # save the DESeq2 object
+# dds %>%
+#   rio::export(here::here(datadir, "Melanoma.DEseqDataSet.RDS"))
+# 
+# # apply variance stabilizing transfrmation
+# dds_vst <- dds %>%
+#   vst
+# 
+# # create an ExpressionSet for WGCNA
+# eset <- ExpressionSet(assay(dds_vst))
+# pData(eset) <- colData(dds_vst) %>% data.frame
+# fData(eset) <- rowData(dds_vst) %>% data.frame
+# 
+# 
+# 
+# eset %>%
+#   rio::export(here::here(datadir, "ExpressionSet_WGCNA_MELANOMA.RDS")) # change name according to your needs
+# 
+# # and we are set for the analysis
 
 ```
 
@@ -515,17 +515,22 @@ library(WGCNA)
 library(lmerTest)
 library(Biobase)
 
-net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+net <- rio::import(here::here(datadir, "WGCNA_network_bc.RDS"))
 
 # correlate traits with module eigengenes
+
 pdata <- pData(net$eset) %>%
-  dplyr::select(barcode, sample_type) %>%
-  rename(SAMPLEID = barcode) %>%
-  mutate(sample_type = case_when(sample_type == "Solid Tissue Normal" ~ "NORMAL",
-                                 sample_type == "Primary Tumor" ~ "TUMOR",
-                                 TRUE ~ "TUMOR")) %>%
+  rownames_to_column("barcode") %>% 
+  dplyr::select(barcode, RNACluster) %>%
+  rename(SAMPLEID = barcode, 
+         sample_type = RNACluster) %>%
+  # mutate(sample_type = case_when(sample_type == "Solid Tissue Normal" ~ "NORMAL",
+  #                                sample_type == "Primary Tumor" ~ "TUMOR",
+  #                                TRUE ~ "TUMOR")) %>%
   mutate(sample_type = factor(sample_type,
-                              levels = c("NORMAL", "TUMOR")))
+                              levels = c("fibro", "epithilial", "neuroendo"))) %>% 
+  mutate(SAMPLEID_cp = SAMPLEID) %>% 
+  column_to_rownames(var = "SAMPLEID")
 
 # Define numbers of genes and samples
 moduleColors = paste("M", net$colors, sep = "")
@@ -535,6 +540,8 @@ nSamples <- nrow(net$params$datExpr)
 MEs <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
   dplyr::select(!matches("M0"))
 
+dim(MEs)
+
 traits <- pdata %>%
   dplyr::select(sample_type) %>%
   mutate(sample_type = as.numeric(sample_type)) %>%
@@ -542,8 +549,10 @@ traits <- pdata %>%
 
 
 
+dim(traits)
+
 # calculate the correlation
-moduleTraitCor <- cor(MEs, as.matrix(traits[rownames(MEs),]), use = "p")
+moduleTraitCor <- cor(MEs, as.matrix(traits[rownames(MEs),]), use = "p") # der Befehl funktioniert nicht!!!
 # calculate the p-value for the correlation coefficient
 moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
 
@@ -601,7 +610,7 @@ moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
 
 order <- hclust(dist(moduleTraitCor))$order
 moduleTraitCor <- moduleTraitCor[order,]
-moduleTraitPvalue <- moduleTraitPvalue[rownames(moduleTraitCor),]
+moduleTraitPvalue <- moduleTraitPvalue[rownames(moduleTraitCor),] # rg: comment out, did not work;
 
 
 # convert the matrices into a data frame, with module annotation
@@ -612,7 +621,11 @@ moduleTraitPvalue <- moduleTraitPvalue %>%
 
 moduleTraitCor <- moduleTraitCor %>%
   data.frame(stringsAsFactors = FALSE) %>%
-  mutate(module = str_replace(rownames(.), "ME", "")) %>%
+  # dplyr::mutate(module = str_replace(rownames(.), "ME", "")) %>%
+    # dplyr::mutate(module = rownames(.)) %>%
+  tibble::rownames_to_column(var = "module")  %>% 
+  mutate(module_cp = module) %>% 
+  column_to_rownames(var = "module_cp") %>% 
   pivot_longer(!matches("module")) %T>%
   # save module trait cor
   saveRDS(file.path(resultsdir, "ModuleTraitCor.RDS"))

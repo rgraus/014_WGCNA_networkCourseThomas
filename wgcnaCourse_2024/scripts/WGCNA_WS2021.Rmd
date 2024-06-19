@@ -520,8 +520,11 @@ library(WGCNA)
 library(lmerTest)
 library(Biobase)
 
-net <- rio::import(here::here(datadir, "WGCNA_network_PRAD.RDS"))
+net <- rio::import("" "./wgcnaCourse_2024/data/WGCNA_network_PRAD.RDS")
+```
 
+
+```{r calculate_association}
 # correlate traits with module eigengenes
 pdata <- pData(net$eset) %>%
   dplyr::select(barcode, sample_type) %>%
